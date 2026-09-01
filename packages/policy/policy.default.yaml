@@ -1,0 +1,191 @@
+# =============================================================================
+# RECOVERY POLICY — version 1
+#
+# Bounds live here, as versioned data, not scattered through code. Every audit row
+# records the policy version that governed it, so the exact rules in force when a
+# decision was made are one lookup away years later.
+#
+# This is also what lets the agent's behaviour change live on stage without a
+# deploy: flip `kill_switch` and the next claim loop halts.
+# =============================================================================
+
+version: 1
+approved_by: seed@recovery-controller.local
+
+# -----------------------------------------------------------------------------
+# Global bounds
+#
+# These are safety bounds. The policy-proposal agent is STRUCTURALLY INCAPABLE of
+# suggesting changes here — the fields are absent from the proposal schema in
+# @rc/ai, so a malformed or adversarial proposal cannot reach them. Only a human
+# edits this block.
+# -----------------------------------------------------------------------------
+global:
+  # The stop-everything switch. Checked before any other rule, on every decision.
+  kill_switch: false
+
+  # No customer contact overnight. Straddles midnight, which is the case a naive
+  # `start <= t < end` comparison gets exactly backwards.
+  quiet_hours:
+    start: "21:00"
+    end: "09:00"
+    tz: "Asia/Kolkata"
+
+  # A recovery system without this is a harassment engine.
+  max_contacts_per_customer_per_week: 2
+
+  # Hard ceiling on fee spend for a whole batch, independent of per-transaction
+  # economics. Protects against a systematic mispricing draining the account
+  # before anyone notices.
+  max_total_fee_spend_per_batch_paise: 500000
+
+  # The expected-value floor. Below this, the action does not fire — however
+  # cheap, because a rupee of expected value does not justify a customer contact.
+  ev_floor_paise: 500
+
+  # Used when a transaction carries no margin of its own.
+  default_contribution_margin_bps: 1800
+
+  # Channels that require an explicit opt-in before anything is sent. All of them,
+  # in India.
+  require_consent_for_channels: [sms, whatsapp, email]
+
+# -----------------------------------------------------------------------------
+# Costs
+#
+# Per-attempt and per-message costs, used by the expected-value gate. Merchant-
+# specific in reality; representative here. These are the figures that make the
+# reported net value net rather than gross.
+# -----------------------------------------------------------------------------
+costs:
+  gateway_fee_paise:
+    card: 350
+    upi_collect: 80
+    upi_intent: 80
+    netbanking: 200
+    wallet: 150
+  message_cost_paise:
+    sms: 18
+    whatsapp: 75
+    email: 2
+  # Amortised model spend per decision, so the LLM's cost lands in net value
+  # rather than being quietly excluded from it.
+  llm_amortised_paise: 4
+
+# -----------------------------------------------------------------------------
+# Tunable ranges
+#
+# The only fields the proposal agent may touch, with hard clamps. A proposal
+# outside these ranges is rejected before a human ever sees it.
+# -----------------------------------------------------------------------------
+tunable:
+  min_gap_hours: { min: 24, max: 96 }
+  ev_floor_paise: { min: 200, max: 2000 }
+
+# -----------------------------------------------------------------------------
+# Per-reason-code strategy
+#
+# `schedule` is the whole plan: one entry per permitted attempt, in order. Its
+# LENGTH IS THE ATTEMPT CAP — there is no separate `max_attempts` field, because
+# two sources of truth for "how many tries" is one more than can be kept in step.
+#
+# An empty schedule means no attempt is ever permitted. That is not a low
+# probability, it is zero: retrying an expired card or a revoked mandate cannot
+# succeed, so it must never consume budget.
+#
+# Each entry's `timing` is what the published prior is looked up against, which is
+# why the vocabulary here matches `priors.published.yaml` exactly.
+# -----------------------------------------------------------------------------
+reason_codes:
+
+  insufficient_funds:
+    label: "Retry aligned to the customer's credit window"
+    schedule:
+      - { action: retry, timing: immediate }
+      - { action: retry, timing: salary_window, notify: true }
+    min_gap_hours: 48
+    template: tpl_if_reminder_v3
+    note: >-
+      Timing is the entire lever. The first attempt is a cheap probe in case a
+      pending credit has settled; the second is placed after the observed credit
+      day, which is where the published prior says the real lift is.
+
+  issuer_down:
+    label: "Short exponential backoff, no customer contact"
+    schedule:
+      - { action: retry, timing: short_backoff }
+      - { action: retry, timing: medium_backoff }
+      - { action: retry, timing: medium_backoff }
+    min_gap_hours: 0
+    note: >-
+      Transient and self-healing. Contacting the customer is pure noise — nothing
+      they can do affects the outcome, so `notify` is absent on every entry.
+
+  do_not_honour:
+    label: "One cheap probe, then escalate"
+    schedule:
+      - { action: retry, timing: next_day }
+    min_gap_hours: 24
+    note: >-
+      The network permits the issuer to refuse without disclosing why, so the
+      cause is unknowable and no schedule can be targeted at it. The
+      expected-value gate is the real control here: on a low-margin transaction
+      even this single probe will not clear the floor, and it should not.
+
+  threeds_timeout:
+    label: "Switch rail rather than re-present the challenge"
+    schedule:
+      - { action: switch_rail, timing: alt_rail, rail: upi_intent, notify: true }
+      - { action: switch_rail, timing: alt_rail, rail: netbanking }
+    min_gap_hours: 0
+    template: tpl_alt_rail_v2
+    note: >-
+      The instrument is fine; the flow failed. Re-presenting the same 3DS
+      challenge on the same bad network reproduces the failure.
+
+  network_timeout:
+    label: "One immediate re-present"
+    schedule:
+      - { action: retry, timing: immediate }
+    min_gap_hours: 0
+    note: "Transport-layer, not issuer. The cheapest genuine recovery available."
+
+  # --- terminal codes: empty schedule, escalate ------------------------------
+
+  card_expired:
+    label: "Ask for a new instrument"
+    schedule: []
+    escalate: true
+    notify_on_escalate: true
+    template: tpl_update_card_v4
+    note: >-
+      Terminal for the stored card. The only intervention with non-zero value is
+      a nudge for a new instrument, so this is a messaging problem wearing a
+      retry problem's clothes.
+
+  mandate_expired:
+    label: "Escalate for re-authorisation"
+    schedule: []
+    escalate: true
+    notify_on_escalate: true
+    template: tpl_remandate_v2
+    note: "There is no live authorisation to debit. Retry success is structurally zero."
+
+  suspected_fraud_block:
+    label: "Escalate, never contact"
+    schedule: []
+    escalate: true
+    notify_on_escalate: false
+    note: >-
+      Messaging a customer whose transaction was risk-flagged is a compliance
+      incident, and retrying past a risk decision is worse than the loss.
+
+  unknown:
+    label: "Quarantine and cluster"
+    schedule: []
+    escalate: true
+    notify_on_escalate: false
+    note: >-
+      Reached when calibrated confidence is below threshold, or the reason string
+      is genuinely novel. No intervention fires on an unclassified root cause —
+      guessing would spend money on a coin flip.

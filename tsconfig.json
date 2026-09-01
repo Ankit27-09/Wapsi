@@ -1,0 +1,13 @@
+{
+  "//": "Solution-style root: no files of its own, only references. `tsc --build` walks these in dependency order and builds incrementally.",
+  "files": [],
+  "references": [
+    { "path": "packages/core" },
+    { "path": "packages/db" },
+    { "path": "packages/policy" },
+    { "path": "packages/simulator" },
+    { "path": "packages/ai" },
+    { "path": "packages/engine" },
+    { "path": "packages/eval" }
+  ]
+}

@@ -1,0 +1,187 @@
+# =============================================================================
+# PUBLISHED SUCCESS PRIORS
+#
+# What the policy engine BELIEVES about the world.
+#
+# This file is one half of the Chinese wall. The other half — the simulator's
+# `priors.truth.yaml` — is what the world actually does. The two are separately
+# authored and the build fails if this package can see that one.
+#
+# Why it matters: if the policy read the simulator's truth, then "the policy beat
+# the baselines" would be an identity, not a measurement. The policy would be a
+# mirror of the oracle it is graded against, and the headline number would carry
+# no information. So the policy is *permitted to be wrong here*, and §4.5 of the
+# brief measures how wrong it can be before it stops paying for itself.
+#
+# EVERY ROW CARRIES A `source`.
+#
+#   { ref: "<document>, <section>", retrieved: "<YYYY-MM-DD>" }
+#       A figure taken from a published source. Perturbed ±40% in the sweep.
+#
+#   ASSUMED
+#       No public figure was found. Requires an `assumption` explaining the
+#       reasoning. Perturbed ±60% in the sweep — wider, because the uncertainty
+#       is larger and pretending otherwise would be the dishonest option.
+#
+# Rows currently marked ASSUMED with a `TODO(cite)` are research debt, tracked in
+# Appendix C of the build brief. The MECHANISM that widens their band is real and
+# tested; the citations are a separate task. Nothing here is presented as sourced
+# when it is not.
+# =============================================================================
+
+version: 1
+
+# Perturbation bands used by the sensitivity sweep. Assumed figures get the wider
+# band automatically — honesty is mechanised rather than promised.
+bands:
+  cited_pct: 40
+  assumed_pct: 60
+
+# Timing buckets. The policy chooses a bucket; the bucket carries the prior. Keeping
+# these coarse is deliberate: a prior table with a row per hour would imply precision
+# that no public source supports.
+timings:
+  immediate: "within five minutes of the failure"
+  short_backoff: "roughly fifteen minutes later"
+  medium_backoff: "two to six hours later"
+  next_day: "roughly twenty-four hours later"
+  salary_window: "48-96 hours later, aligned to the customer's observed credit day"
+  alt_rail: "re-presented on a different rail rather than retried on the same one"
+
+# -----------------------------------------------------------------------------
+# Structural zeros
+#
+# Not estimates. These are zero because there is nothing to debit, not because
+# retrying rarely works. Listing them explicitly means the EV gate can never be
+# handed a nonzero prior for a code where success is impossible — the single most
+# expensive modelling error available on this problem.
+# -----------------------------------------------------------------------------
+structural_zeros:
+  - reason_code: card_expired
+    why: "The stored instrument's expiry is in the past. No retry changes that."
+  - reason_code: mandate_expired
+    why: "There is no live authorisation to debit. Needs re-authorisation."
+  - reason_code: suspected_fraud_block
+    why: "Never retried and never contacted. Retrying past a risk decision is worse than the loss."
+  - reason_code: unknown
+    why: "No intervention fires on an unclassified root cause."
+
+# -----------------------------------------------------------------------------
+# Priors
+# -----------------------------------------------------------------------------
+priors:
+  # --- insufficient funds -----------------------------------------------------
+  # The class where timing is the entire lever, and therefore the class the whole
+  # submission's headline advantage most depends on. If the salary-window lift is
+  # small, the intelligence is worth much less — which is exactly the failure
+  # region the sweep is built to name out loud.
+  - reason_code: insufficient_funds
+    attempt: 1
+    timing: immediate
+    p_bps: 800
+    source: ASSUMED
+    assumption: >-
+      An immediate re-present against an account that just declined for balance is
+      close to a null action: the balance has not changed in five minutes. Set low
+      but non-zero to account for pending credits settling.
+    # TODO(cite): card network reattempt guidance for decline code 51.
+
+  - reason_code: insufficient_funds
+    attempt: 2
+    timing: salary_window
+    p_bps: 4500
+    source: ASSUMED
+    assumption: >-
+      A re-present timed to land after a salary credit is the canonical dunning
+      optimisation. Set as a material but not dominant improvement over immediate.
+      This is the single most load-bearing assumption in the file.
+    # TODO(cite): published smart-retry / adaptive-acceptance uplift figures.
+
+  - reason_code: insufficient_funds
+    attempt: 2
+    timing: next_day
+    p_bps: 1900
+    source: ASSUMED
+    assumption: >-
+      A next-day retry that is not aligned to a credit event captures some of the
+      salary-window benefit by luck. Priced between immediate and aligned.
+
+  # --- issuer outage ----------------------------------------------------------
+  # Transient and self-healing. The cheapest genuine recovery in the taxonomy, and
+  # the one where contacting the customer is pure noise.
+  - reason_code: issuer_down
+    attempt: 1
+    timing: short_backoff
+    p_bps: 6200
+    source: ASSUMED
+    assumption: >-
+      Most issuer-side incidents resolve inside an hour, so a fifteen-minute
+      backoff catches a large share of them.
+    # TODO(cite): public issuer-availability or processor status data.
+
+  - reason_code: issuer_down
+    attempt: 2
+    timing: medium_backoff
+    p_bps: 7400
+    source: ASSUMED
+    assumption: >-
+      Conditional on the first backoff having failed, a longer wait clears most of
+      the remaining incidents. Higher than attempt 1 because the population that
+      survives to attempt 2 is dominated by longer outages that do eventually end.
+
+  - reason_code: issuer_down
+    attempt: 3
+    timing: medium_backoff
+    p_bps: 3100
+    source: ASSUMED
+    assumption: >-
+      By the third attempt the surviving population is either a long outage or a
+      misclassification. Priced down sharply so the EV gate stops.
+
+  # --- do not honour ----------------------------------------------------------
+  # The most common card decline in the world and deliberately uninformative: the
+  # network permits the issuer to refuse without disclosing why. Because the cause
+  # is unknowable, the EV gate rather than a retry schedule is the real control.
+  - reason_code: do_not_honour
+    attempt: 1
+    timing: next_day
+    p_bps: 1500
+    source: ASSUMED
+    assumption: >-
+      A blended figure across the many causes that hide behind this code — funds,
+      velocity rules, card controls, soft risk declines. Low enough that a single
+      cheap probe is usually the only economically defensible action.
+    # TODO(cite): network guidance on decline code 05 reattempt behaviour.
+
+  # --- authentication timeout -------------------------------------------------
+  # The instrument is fine; the flow failed. So the intervention is a different
+  # rail, not a re-presented challenge on the same bad network.
+  - reason_code: threeds_timeout
+    attempt: 1
+    timing: alt_rail
+    p_bps: 5800
+    source: ASSUMED
+    assumption: >-
+      Switching to a rail with no browser-based challenge removes the failure mode
+      entirely for a customer who is still present and willing to pay.
+    # TODO(cite): public UPI vs card-with-3DS success-rate comparison.
+
+  - reason_code: threeds_timeout
+    attempt: 2
+    timing: alt_rail
+    p_bps: 2400
+    source: ASSUMED
+    assumption: >-
+      A second rail switch mostly reaches customers who have already abandoned.
+
+  # --- transport failure ------------------------------------------------------
+  - reason_code: network_timeout
+    attempt: 1
+    timing: immediate
+    p_bps: 7000
+    source: ASSUMED
+    assumption: >-
+      A gateway or transport failure is usually momentary and has nothing to do
+      with the instrument or the issuer, so an immediate re-present is both the
+      cheapest and the most likely to succeed.
+    # TODO(cite): gateway reliability disclosures.

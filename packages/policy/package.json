@@ -1,0 +1,28 @@
+{
+  "name": "@rc/policy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Deterministic policy engine: published success priors, the expected-value gate, and bounds checking. Structurally forbidden from importing @rc/simulator.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "priors.published.yaml"],
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@rc/core": "workspace:*",
+    "yaml": "^2.6.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "fast-check": "^3.23.2"
+  }
+}

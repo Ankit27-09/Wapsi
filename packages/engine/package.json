@@ -1,0 +1,28 @@
+{
+  "name": "@rc/engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The decision core: plans one action per transaction, executes it idempotently, reconciles stranded attempts. Deterministic given a clock and a gateway.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@rc/core": "workspace:*",
+    "@rc/db": "workspace:*",
+    "@rc/policy": "workspace:*"
+  },
+  "devDependencies": {
+    "fast-check": "^3.23.2"
+  }
+}

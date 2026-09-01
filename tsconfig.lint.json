@@ -1,0 +1,10 @@
+{
+  "//": "Type information for ESLint only — no emit, and it includes test files, which the build configs deliberately exclude. Keeping these concerns in separate files means tests are fully type-checked by the linter without ending up in dist/.",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "incremental": false
+  },
+  "include": ["packages/*/src/**/*.ts", "apps/*/src/**/*.ts", "vitest.config.ts"]
+}

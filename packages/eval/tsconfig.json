@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/**/*.test.ts"],
+  "references": [
+    { "path": "../ai" },
+    { "path": "../core" },
+    { "path": "../db" },
+    { "path": "../policy" },
+    { "path": "../simulator" },
+    { "path": "../engine" }
+  ]
+}

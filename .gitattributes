@@ -1,0 +1,16 @@
+# Normalise line endings so the repository is identical regardless of who clones it.
+#
+# Without this, a Windows checkout rewrites every file to CRLF and a Linux one to LF, which
+# turns "did anything change?" into a question about the contributor's operating system. It
+# also matters here specifically: `pnpm demo` hashes the policy YAML into
+# `policy_version.hash`, and a line-ending change would silently alter that hash — making a
+# policy look modified when only the checkout differed.
+
+* text=auto eol=lf
+
+# Binary, never touched.
+*.png binary
+*.jpg binary
+*.pdf binary
+*.docx binary
+*.node binary

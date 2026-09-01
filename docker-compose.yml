@@ -1,0 +1,48 @@
+name: recovery-controller
+
+services:
+  postgres:
+    image: postgres:16.6-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: rc
+      POSTGRES_PASSWORD: rc_local_only
+      POSTGRES_DB: recovery_controller
+      # Deterministic sorting so seeded runs are byte-identical across machines.
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rc -d recovery_controller"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    command:
+      - postgres
+      - -c
+      - max_connections=100
+      # Surfaces lock contention in the concurrent-claim tests instead of hiding it.
+      - -c
+      - log_lock_waits=on
+      - -c
+      - deadlock_timeout=200ms
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    ports:
+      - "6380:6379"
+    command: ["redis-server", "--appendonly", "yes", "--save", ""]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  pgdata:
+  redisdata:

@@ -1,0 +1,186 @@
+# =============================================================================
+# GROUND TRUTH
+#
+# What the world actually does, in this simulation.
+#
+# The other half of the Chinese wall. `@rc/policy` cannot import this package —
+# `pnpm lint:boundaries` fails the build if it tries — so the policy engine
+# decides using its own published priors and is graded against these.
+#
+# THE VALUES HERE DELIBERATELY DIFFER FROM THE PUBLISHED PRIORS.
+#
+# That is the entire point. If they matched, "the policy beat the baselines" would
+# be a tautology. They differ in two ways, both of which mirror how a real recovery
+# system is wrong about the world:
+#
+#   1. LEVEL ERROR. Population estimates are off in both directions. Notably, the
+#      published salary-window lift on insufficient_funds is 5.6x (800 -> 4500)
+#      while the truth here is 3.7x (1100 -> 4100). The policy is OPTIMISTIC about
+#      its single most load-bearing assumption. That is realistic, and it is what
+#      makes the sensitivity sweep worth running.
+#
+#   2. UNOBSERVED HETEROGENEITY. Truth varies by issuer. The policy sees only a
+#      blended population figure, because a merchant's gateway does not hand out
+#      per-issuer conditional success curves. This is information the policy
+#      structurally cannot have, not information it neglected to look up.
+#
+# The oracle arm (B3) is the only consumer allowed to read this as a decision
+# input. It plays perfectly against it, which is what turns the headline claim from
+# "we beat naive retry" into "we captured X% of what was achievable".
+# =============================================================================
+
+version: 1
+
+# -----------------------------------------------------------------------------
+# Issuers
+#
+# Multipliers in basis points against the base prior. 10_000 = no change.
+# Weights drive how often a synthetic customer is assigned to each issuer.
+#
+# Names are fictional on purpose. Attaching real bank names to invented success
+# rates would be a claim about real institutions that nothing here supports.
+# -----------------------------------------------------------------------------
+issuers:
+  - id: ISS_NORTH
+    weight: 30
+    multiplier_bps: 11200
+    note: "Better than population: fast authorisation, low false declines."
+  - id: ISS_SOUTH
+    weight: 25
+    multiplier_bps: 9800
+    note: "Close to population average."
+  - id: ISS_EAST
+    weight: 20
+    multiplier_bps: 8600
+    note: "Conservative risk posture; more soft declines that never recover."
+  - id: ISS_WEST
+    weight: 15
+    multiplier_bps: 10400
+    note: "Slightly better than average."
+  - id: ISS_COOP
+    weight: 10
+    multiplier_bps: 7200
+    note: "Small co-operative bank: flaky infrastructure, long outage tails."
+
+structural_zeros:
+  - card_expired
+  - mandate_expired
+  - suspected_fraud_block
+
+truth:
+  # --- insufficient funds ---------------------------------------------------
+  # Published says 800 immediate / 4500 salary-window. Truth is 1100 / 4100.
+  # The policy underestimates the immediate case and overestimates the aligned
+  # one, so it is wrong in the direction that flatters its own strategy.
+  - reason_code: insufficient_funds
+    attempt: 1
+    timing: immediate
+    p_bps: 1100
+  - reason_code: insufficient_funds
+    attempt: 2
+    timing: salary_window
+    p_bps: 4100
+  - reason_code: insufficient_funds
+    attempt: 2
+    timing: next_day
+    p_bps: 2300
+  - reason_code: insufficient_funds
+    attempt: 1
+    timing: next_day
+    p_bps: 2000
+  - reason_code: insufficient_funds
+    attempt: 1
+    timing: salary_window
+    p_bps: 3800
+  # A third generic attempt still has some chance — balances do change. Included so a
+  # fixed-schedule strategy is evaluated against a realistic world rather than one where
+  # its later attempts are impossible by construction, which would be a rigged comparison.
+  - reason_code: insufficient_funds
+    attempt: 3
+    timing: next_day
+    p_bps: 1400
+
+  # --- issuer outage --------------------------------------------------------
+  # Published is optimistic at attempt 1 (6200 vs 5400) because real outages have
+  # a longer tail than a blended figure suggests.
+  - reason_code: issuer_down
+    attempt: 1
+    timing: short_backoff
+    p_bps: 5400
+  - reason_code: issuer_down
+    attempt: 2
+    timing: medium_backoff
+    p_bps: 7100
+  - reason_code: issuer_down
+    attempt: 3
+    timing: medium_backoff
+    p_bps: 3600
+  - reason_code: issuer_down
+    attempt: 1
+    timing: immediate
+    p_bps: 900
+  - reason_code: issuer_down
+    attempt: 1
+    timing: next_day
+    p_bps: 8200
+  - reason_code: issuer_down
+    attempt: 2
+    timing: next_day
+    p_bps: 5100
+  - reason_code: issuer_down
+    attempt: 3
+    timing: next_day
+    p_bps: 2200
+
+  # --- do not honour --------------------------------------------------------
+  # Truth is worse than published (1100 vs 1500). This code hides mostly
+  # unrecoverable causes, which is precisely why a schedule cannot help and only
+  # the expected-value gate can.
+  - reason_code: do_not_honour
+    attempt: 1
+    timing: next_day
+    p_bps: 1100
+  - reason_code: do_not_honour
+    attempt: 1
+    timing: immediate
+    p_bps: 400
+  - reason_code: do_not_honour
+    attempt: 2
+    timing: next_day
+    p_bps: 600
+
+  # --- authentication timeout ----------------------------------------------
+  - reason_code: threeds_timeout
+    attempt: 1
+    timing: alt_rail
+    p_bps: 6100
+  - reason_code: threeds_timeout
+    attempt: 2
+    timing: alt_rail
+    p_bps: 2100
+  - reason_code: threeds_timeout
+    attempt: 1
+    timing: immediate
+    p_bps: 1200
+  - reason_code: threeds_timeout
+    attempt: 1
+    timing: next_day
+    p_bps: 1500
+  - reason_code: threeds_timeout
+    attempt: 2
+    timing: next_day
+    p_bps: 700
+  - reason_code: do_not_honour
+    attempt: 3
+    timing: next_day
+    p_bps: 300
+
+  # --- transport failure ---------------------------------------------------
+  - reason_code: network_timeout
+    attempt: 1
+    timing: immediate
+    p_bps: 7300
+  - reason_code: network_timeout
+    attempt: 2
+    timing: short_backoff
+    p_bps: 2600
