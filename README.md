@@ -476,8 +476,13 @@ validates its configuration at boot and fails immediately if anything is missing
 
 ## Architecture
 
+**→ [`ARCHITECTURE.md`](ARCHITECTURE.md) — thirteen diagrams, rendered.** The package graph and
+the wall through it, the full refusal decision tree, one decision traced end to end, the
+crash-resume protocol, the data model with every invariant the database enforces, the six-arm
+harness, and the trust boundaries. Every name and edge in it is taken from the source.
+
 ```
-failed payments → classify → POLICY ENGINE → EV GATE → BOUNDS → worker → audit
+revenue at risk → classify → POLICY ENGINE → EV GATE → BOUNDS → worker → audit
                      │            │                                        │
                    (LLM)    (deterministic)                        (append-only)
                      │
@@ -500,7 +505,9 @@ result means anything.
 `Paise` type with no `number` constructor. Margins *and probabilities* are integer basis
 points, so the expected-value computation is integer arithmetic end to end.
 
-Full detail: [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md).
+Diagrams: [`ARCHITECTURE.md`](ARCHITECTURE.md). Build history:
+[`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md). What broke:
+[`FAILURES.md`](FAILURES.md).
 
 ---
 
