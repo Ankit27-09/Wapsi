@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { paise, paiseFromRupeeString } from '@rc/core';
-import { RazorpayError } from './client.js';
 import { readConfig, type RazorpayConfig } from './config.js';
 import { createLink, ensureLink, findLinkByReference, linkBody } from './links.js';
 
@@ -158,21 +157,48 @@ describe('idempotency on a re-run', () => {
     expect(result.reused).toBe(false);
   });
 
-  it('surfaces the contradiction when a duplicate cannot then be found', async () => {
-    // Razorpay saying the reference exists and then not returning it. Retrying the create
-    // would loop; inventing a link would report a demand that was never made.
+  it('retries the lookup, because the list endpoint lags the create', async () => {
+    // OBSERVED AGAINST THE REAL API, not hypothesised. Re-running immediately after a first
+    // run, one link in three came back as a duplicate on create and then as absent from the
+    // query by reference. A minute later all three were found. The create is immediately
+    // consistent; the list is not.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(ok({ error: { description: 'Reference id already exists' } }, 400))
+      .mockResolvedValueOnce(ok({ payment_links: [] })) // lagging
+      .mockResolvedValueOnce(ok({ payment_links: [validLink] })); // caught up
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await ensureLink(config, request);
+
+    expect(result.reused).toBe(true);
+    expect(result.link.id).toBe('plink_test_1');
+  }, 10_000);
+
+  it('gives up rather than looping when the lag never resolves', async () => {
+    // Bounded at three tries. Past that, "Razorpay says it exists but will not return it" is
+    // a genuine contradiction: retrying the create would loop, and inventing a link would
+    // report a demand that was never made.
+    // `mockImplementation`, not `mockResolvedValue`. A `Response` body can only be read
+    // once, so returning the SAME object for every call fails on the second read with
+    // "Body has already been consumed" — which is a test artefact that looks exactly like a
+    // client bug. Each call gets a fresh Response.
+    let call = 0;
     vi.stubGlobal(
       'fetch',
-      vi
-        .fn()
-        .mockResolvedValueOnce(
-          ok({ error: { description: 'Reference id already exists' } }, 400),
-        )
-        .mockResolvedValueOnce(ok({ payment_links: [] })),
+      vi.fn().mockImplementation(() => {
+        call += 1;
+        return Promise.resolve(
+          call === 1
+            ? ok({ error: { description: 'Reference id already exists' } }, 400)
+            : ok({ payment_links: [] }),
+        );
+      }),
     );
 
-    await expect(ensureLink(config, request)).rejects.toBeInstanceOf(RazorpayError);
-  });
+    await expect(ensureLink(config, request)).rejects.toThrow(/DUPLICATE_NOT_FOUND|three attempts/);
+  }, 10_000);
 
   it('returns null rather than throwing when no link exists for a reference', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(ok({ payment_links: [] })));

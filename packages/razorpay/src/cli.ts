@@ -2,7 +2,7 @@ import { PaiseSchema, bps, formatINR, mulBps, type Paise } from '@rc/core';
 import { createDb } from '@rc/db';
 import { RazorpayError } from './client.js';
 import { readConfig } from './config.js';
-import { ensureLink, linkBody, type LinkRequest } from './links.js';
+import { ensureLink, linkBody, toReference, type LinkRequest } from './links.js';
 
 /**
  * `pnpm razorpay` — turn decisions the engine already made into real Razorpay Payment Links.
@@ -203,8 +203,9 @@ async function main(): Promise<void> {
     let failed = 0;
 
     for (const decision of decisions) {
+      const reference = toReference(decision.key);
       const link: LinkRequest = {
-        referenceId: decision.key,
+        referenceId: reference,
         amount: decision.amount,
         description: describe(decision.reasonCode, decision.riskClass),
         customerName: decision.customerName,
@@ -238,7 +239,7 @@ async function main(): Promise<void> {
         else issued += 1;
         process.stdout.write(
           `    ${result.reused ? 'already existed' : 'created'}  ${result.link.short_url}\n` +
-            `    status ${result.link.status} · ref ${decision.key.slice(0, 16)}…\n\n`,
+            `    status ${result.link.status} · ref ${reference}\n\n`,
         );
       } catch (cause) {
         failed += 1;
