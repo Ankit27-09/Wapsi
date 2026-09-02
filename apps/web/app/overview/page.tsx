@@ -60,7 +60,7 @@ export default async function Overview() {
         </div>
         <div className="tile">
           <div className="label">Of achievable</div>
-          <div className="value">{shareOf(rc?.net ?? 0n, ceiling?.net ?? 0n)}</div>
+          <div className="value">{shareOf(rc?.valueRecovered ?? 0n, ceiling?.valueRecovered ?? 0n)}</div>
           <div className="note">vs perfect play</div>
         </div>
         <div className="tile">
@@ -86,49 +86,60 @@ export default async function Overview() {
       </div>
 
       <h3>Arms</h3>
+      <p className="section-note">
+        Six strategies over one identical seeded population, so a difference between them is a
+        difference in strategy rather than in luck. <strong>Net</strong> is the column that
+        matters — the two arms that recover the most transactions are not the two that keep the
+        most money.
+      </p>
       <div className="wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Arm</th>
-              <th>Recovered</th>
-              <th>Rate</th>
-              <th>Value recovered</th>
-              <th>Cost</th>
-              <th>Net</th>
-              <th>Of ceiling</th>
-              <th>Neg-EV</th>
-            </tr>
-          </thead>
-          <tbody>
-            {arms.map((arm) => (
-              <tr key={arm.arm} data-highlight={arm.arm === 'rc' ? 'true' : 'false'}>
-                <td>
-                  <span className="mono dim">{arm.arm}</span>{' '}
-                  <span style={{ fontFamily: 'var(--sans)' }}>{arm.label}</span>
-                </td>
-                <td>
-                  {arm.recovered}/{arm.recoverable}
-                </td>
-                <td>{rate(arm.rateBps)}</td>
-                <td>{formatINR(arm.valueRecovered)}</td>
-                <td>{formatINR(arm.cost)}</td>
-                <td className={arm.arm === 'rc' ? 'good' : undefined}>{formatINR(arm.net)}</td>
-                <td>{shareOf(arm.net, ceiling?.net ?? 0n)}</td>
-                <td className={arm.negativeEvAttempts === 0 ? 'good' : 'warn'}>
-                  {arm.negativeEvAttempts === 0 && arm.attemptsFired > 0
-                    ? '0'
-                    : `${arm.negativeEvAttempts}/${arm.attemptsFired}`}
-                </td>
+        <div className="wrap-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Arm</th>
+                <th>Recovered</th>
+                <th>Rate</th>
+                <th>Value recovered</th>
+                <th>Cost</th>
+                <th>Net</th>
+                <th>Of ceiling</th>
+                <th>Neg-EV</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {arms.map((arm) => (
+                <tr key={arm.arm} data-highlight={arm.arm === 'rc' ? 'true' : 'false'}>
+                  <td>
+                    <span className="mono dim">{arm.arm}</span> {arm.label}
+                  </td>
+                  <td>
+                    {arm.recovered}/{arm.recoverable}
+                  </td>
+                  <td>{rate(arm.rateBps)}</td>
+                  <td>{formatINR(arm.valueRecovered)}</td>
+                  <td>{formatINR(arm.cost)}</td>
+                  {/* The headline figure of the whole table, so it is emphasised on every row
+                      rather than only on ours — a highlight that only ever lands on the
+                      controller's number invites the reader to distrust the comparison. */}
+                  <td className="lead-num">{formatINR(arm.net)}</td>
+                  <td>{shareOf(arm.valueRecovered, ceiling?.valueRecovered ?? 0n)}</td>
+                  <td className={arm.negativeEvAttempts === 0 ? 'zero-good' : 'warn'}>
+                    {arm.negativeEvAttempts === 0 && arm.attemptsFired > 0
+                      ? '0'
+                      : `${arm.negativeEvAttempts}/${arm.attemptsFired}`}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+            </table>
+        </div>
       </div>
 
       <div className="callout">
         <strong>
-          The controller captured {shareOf(rc?.net ?? 0n, ceiling?.net ?? 0n)} of what perfect
+          The controller captured{' '}
+          {shareOf(rc?.valueRecovered ?? 0n, ceiling?.valueRecovered ?? 0n)} of what perfect
           play could have achieved
         </strong>{' '}
         — {formatINR(sub(rc?.net ?? ZERO, bestBaseline?.net ?? ZERO))} more net value than the
@@ -150,70 +161,78 @@ export default async function Overview() {
         receivables”, so it is broken out here.
       </p>
       <div className="wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Risk class</th>
-              <th>Txns</th>
-              <th>Fired</th>
-              <th>Recovered</th>
-              <th>Refused</th>
-              <th>Value recovered</th>
-              <th>Cost</th>
-              <th>Net</th>
-            </tr>
-          </thead>
-          <tbody>
-            {byClass.map((row) => (
-              <tr key={row.riskClass}>
-                <td className="mono">{row.riskClass}</td>
-                <td>{row.transactions}</td>
-                <td>{row.fired}</td>
-                <td className={row.recovered > 0 ? 'good' : 'dim'}>{row.recovered}</td>
-                <td className="dim">{row.refused}</td>
-                <td>{formatINR(row.valueRecovered)}</td>
-                <td>{formatINR(row.cost)}</td>
-                <td className={row.net > 0n ? 'good' : 'dim'}>{formatINR(row.net)}</td>
+        <div className="wrap-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Risk class</th>
+                <th>Txns</th>
+                <th>Fired</th>
+                <th>Recovered</th>
+                <th>Refused</th>
+                <th>Value recovered</th>
+                <th>Cost</th>
+                <th>Net</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {byClass.map((row) => (
+                <tr key={row.riskClass}>
+                  <td className="mono">{row.riskClass}</td>
+                  <td>{row.transactions}</td>
+                  <td>{row.fired}</td>
+                  <td className={row.recovered > 0 ? 'good' : 'dim'}>{row.recovered}</td>
+                  <td className="dim">{row.refused}</td>
+                  <td>{formatINR(row.valueRecovered)}</td>
+                  <td>{formatINR(row.cost)}</td>
+                  <td className="lead-num">{formatINR(row.net)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <h3>By failure cause</h3>
       <div className="wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Reason code</th>
-              <th>Activity</th>
-              <th>Fired</th>
-              <th>Recovered</th>
-              <th>Refused</th>
-              <th>Hit rate</th>
-            </tr>
-          </thead>
-          <tbody>
-            {byCode.map((row) => (
-              <tr key={row.code}>
-                <td className="mono">{row.code}</td>
-                <td style={{ width: 130 }}>
-                  <div className="bar">
-                    <span
-                      style={{
-                        width: `${((row.fired + row.refused) / maxActivity) * 100}%`,
-                      }}
-                    />
-                  </div>
-                </td>
-                <td>{row.fired}</td>
-                <td className={row.recovered > 0 ? 'good' : 'dim'}>{row.recovered}</td>
-                <td className="dim">{row.refused}</td>
-                <td>{row.fired === 0 ? '—' : `${((row.recovered / row.fired) * 100).toFixed(0)}%`}</td>
+        <div className="wrap-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Reason code</th>
+                <th>Activity</th>
+                <th>Fired</th>
+                <th>Recovered</th>
+                <th>Refused</th>
+                <th>Hit rate</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {byCode.map((row) => (
+                <tr key={row.code}>
+                  <td className="mono">{row.code}</td>
+                  <td style={{ width: 130 }}>
+                    <div className="bar">
+                      <span
+                        style={{
+                          width: `${((row.fired + row.refused) / maxActivity) * 100}%`,
+                        }}
+                      />
+                    </div>
+                  </td>
+                  <td>{row.fired}</td>
+                  <td className={row.recovered > 0 ? 'good' : 'dim'}>{row.recovered}</td>
+                  <td className="dim">{row.refused}</td>
+                  <td>
+                    {row.fired === 0
+                      ? '—'
+                      : `${((row.recovered / row.fired) * 100).toFixed(0)}%`}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <div className="callout warn">

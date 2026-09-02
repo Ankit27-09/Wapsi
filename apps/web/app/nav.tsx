@@ -27,8 +27,10 @@ export function Nav() {
   return (
     <nav className="sidebar">
       <div className="brand">
-        <h1>Recovery Controller</h1>
-        <p>expected-value gated</p>
+        <h1>
+          Recovery <span>Controller</span>
+        </h1>
+        <p>Track 03</p>
       </div>
       <div className="nav">
         {ROUTES.map((route) => (

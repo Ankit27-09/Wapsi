@@ -133,14 +133,16 @@ export default async function Home() {
           <span className="dim">AI Revenue Recovery · Razorpay AI Buildathon 2026</span>
         </div>
 
-        <h1 className="hero-title">Recovery Controller</h1>
+        <h1 className="hero-title">
+          Most recovery attempts <span className="lit">destroy value</span>
+        </h1>
 
         <p className="hero-lede">
-          Most recovery attempts destroy value. A card retry costs ₹3.50 whether it works or
-          not, so a system that retries everything can spend more than it collects. This one
-          decides <em>what</em> to try, <em>when</em>, and on which rail or channel — and most
-          of the time it decides <strong>not to act at all</strong>, with the arithmetic that
-          produced that refusal recorded beside it.
+          A card retry costs ₹3.50 whether it works or not, so a system that retries everything
+          can spend more than it collects. This one decides <em>what</em> to try, <em>when</em>,
+          and on which rail or channel — and most of the time it decides{' '}
+          <strong>not to act at all</strong>, with the arithmetic that produced the refusal
+          recorded beside it.
         </p>
 
         <p className="hero-sub">
