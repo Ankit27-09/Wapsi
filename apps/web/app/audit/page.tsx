@@ -1,4 +1,5 @@
-import { loadAudit } from '../../lib/queries';
+import { loadAudit, seedFrom } from '../../lib/queries';
+import { SeedPicker } from '../seed-picker';
 
 function actorClass(actor: string): string {
   if (actor.startsWith('llm:')) return 'pill accent';
@@ -17,17 +18,20 @@ function actorClass(actor: string): string {
 export default async function Audit({
   searchParams,
 }: {
-  searchParams: Promise<{ trace?: string }>;
+  searchParams: Promise<{ trace?: string; seed?: string }>;
 }) {
   const params = await searchParams;
   const trace = params.trace ?? '';
-  const rows = await loadAudit(trace);
+  const seed = seedFrom(params.seed);
+  const rows = await loadAudit(seed, trace);
 
   const actors = new Map<string, number>();
   for (const row of rows) actors.set(row.actor, (actors.get(row.actor) ?? 0) + 1);
 
   return (
     <>
+      <SeedPicker current={seed} path="/audit" />
+
       <div className="page-head">
         <h2>Audit trail</h2>
         <p>

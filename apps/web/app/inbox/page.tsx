@@ -1,5 +1,6 @@
 import { formatINR } from '@rc/core';
-import { loadBlockedContacts, loadInbox } from '../../lib/queries';
+import { loadBlockedContacts, loadInbox, seedFrom } from '../../lib/queries';
+import { SeedPicker } from '../seed-picker';
 
 /**
  * What customers actually received — and, beside it, what the system refused to send.
@@ -9,12 +10,19 @@ import { loadBlockedContacts, loadInbox } from '../../lib/queries';
  * quiet hours, consent, or contact ceilings, because a system with none of those would
  * render identically.
  */
-export default async function Inbox() {
-  const [messages, blocked] = await Promise.all([loadInbox(), loadBlockedContacts()]);
+export default async function Inbox({
+  searchParams,
+}: {
+  searchParams: Promise<{ seed?: string }>;
+}) {
+  const seed = seedFrom((await searchParams).seed);
+  const [messages, blocked] = await Promise.all([loadInbox(seed), loadBlockedContacts(seed)]);
   const hinglish = messages.filter((m) => m.language === 'hi_latn').length;
 
   return (
     <>
+      <SeedPicker current={seed} path="/inbox" />
+
       <div className="page-head">
         <h2>Customer inbox</h2>
         <p>
@@ -115,10 +123,18 @@ export default async function Inbox() {
       )}
 
       <div className="callout warn">
-        <strong>These messages cost money and recover none of it.</strong> The truth model has
-        no notion of a customer responding to a nudge, so every send above appears as cost in
-        the reported net value and as zero recovery. The compliance layer is real and
-        exercised; any claim that the nudges <em>work</em> would not be.
+        <strong>What these messages rest on.</strong> Message effectiveness <em>is</em>{' '}
+        modelled — four of the five risk classes recover money by messaging and nothing else,
+        so excluding it would have scored most of the system at zero. A payment link, a
+        pre-debit notice and a re-authorisation request each have their own prior, because
+        they are three different questions.
+        <br />
+        <br />
+        But every one of those figures is <code className="mono">ASSUMED</code>, gets the
+        wider ±60% band in the sweep, and states its reasoning in{' '}
+        <code className="mono">priors.published.yaml</code>. The defensible part is the{' '}
+        <em>ordering</em> — an OTP drop-off recovers far better than an abandoned cart. The
+        levels are a draw against a table, not a model of a person deciding to buy.
       </div>
     </>
   );

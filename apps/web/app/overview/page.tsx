@@ -1,5 +1,6 @@
 import { ZERO, formatINR, sub } from '@rc/core';
-import { loadArms, loadByReasonCode, loadByRiskClass, SEED } from '../../lib/queries';
+import { loadArms, loadByReasonCode, loadByRiskClass, seedFrom } from '../../lib/queries';
+import { SeedPicker } from '../seed-picker';
 
 function rate(bps: number): string {
   return `${(bps / 100).toFixed(1)}%`;
@@ -10,13 +11,18 @@ function shareOf(value: bigint, reference: bigint): string {
   return `${(Number((value * 10_000n) / reference) / 100).toFixed(1)}%`;
 }
 
-export default async function Overview() {
-  const arms = await loadArms();
+export default async function Overview({
+  searchParams,
+}: {
+  searchParams: Promise<{ seed?: string }>;
+}) {
+  const seed = seedFrom((await searchParams).seed);
+  const arms = await loadArms(seed);
 
   if (arms.length === 0) {
     return (
       <div className="empty">
-        No run found for seed {SEED}. Run <code className="mono">pnpm demo</code> first.
+        No run found for seed {seed}. Run <code className="mono">pnpm demo</code> first.
       </div>
     );
   }
@@ -37,12 +43,14 @@ export default async function Overview() {
     undefined,
   );
 
-  const byClass = await loadByRiskClass();
-  const byCode = await loadByReasonCode();
+  const byClass = await loadByRiskClass(seed);
+  const byCode = await loadByReasonCode(seed);
   const maxActivity = Math.max(...byCode.map((c) => c.fired + c.refused), 1);
 
   return (
     <>
+      <SeedPicker current={seed} path="/overview" />
+
       <div className="page-head">
         <h2>Overview</h2>
         <p>

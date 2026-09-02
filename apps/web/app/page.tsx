@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { formatINR } from '@rc/core';
-import { loadArms, loadByRiskClass, SEED } from '../lib/queries';
+import { loadArms, loadByRiskClass, seedFrom } from '../lib/queries';
+import { SeedPicker } from './seed-picker';
 
 /**
  * The landing page.
@@ -106,9 +107,14 @@ const LEAKS = [
   { code: 'receivable_overdue', label: 'An invoice is overdue', detail: 'A B2B buyer has not paid' },
 ] as const;
 
-export default async function Home() {
-  const arms = await loadArms();
-  const byClass = await loadByRiskClass();
+export default async function Home({
+  searchParams,
+}: {
+  searchParams: Promise<{ seed?: string }>;
+}) {
+  const seed = seedFrom((await searchParams).seed);
+  const arms = await loadArms(seed);
+  const byClass = await loadByRiskClass(seed);
 
   const rc = arms.find((a) => a.arm === 'rc');
   const ceiling = arms.find((a) => a.arm === 'b3_oracle');
@@ -196,7 +202,7 @@ export default async function Home() {
 
         {hasRun && dunning !== undefined ? (
           <p className="hero-foot">
-            Read from batch <code className="mono">seed {SEED}</code> on every request — no
+            Read from batch <code className="mono">seed {seed}</code> on every request — no
             cached figures, nothing typed in. Same seed always gives the same numbers, which is
             a guarantee rather than a coincidence; run{' '}
             <code className="mono">pnpm eval --seed 99</code> and every figure on this page
@@ -206,6 +212,11 @@ export default async function Home() {
           </p>
         ) : null}
       </section>
+
+      {/* The picker sits here rather than above the hero, because the paragraph directly
+          above it makes exactly this promise — that a different seed moves every figure. A
+          control beats a sentence saying the same thing. */}
+      <SeedPicker current={seed} path="/" />
 
       {/* ---------- the problem ---------- */}
       <h3>Five ways a merchant leaks revenue</h3>

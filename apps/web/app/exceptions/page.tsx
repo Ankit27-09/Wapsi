@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { formatINR } from '@rc/core';
-import { loadExceptions } from '../../lib/queries';
+import { loadExceptions, seedFrom } from '../../lib/queries';
+import { SeedPicker } from '../seed-picker';
 
 const VERDICTS = [
   { key: 'all', label: 'all' },
@@ -20,14 +21,17 @@ function verdictClass(verdict: string): string {
 export default async function Exceptions({
   searchParams,
 }: {
-  searchParams: Promise<{ verdict?: string }>;
+  searchParams: Promise<{ verdict?: string; seed?: string }>;
 }) {
   const params = await searchParams;
   const active = params.verdict ?? 'all';
-  const rows = await loadExceptions(active);
+  const seed = seedFrom(params.seed);
+  const rows = await loadExceptions(seed, active);
 
   return (
     <>
+      <SeedPicker current={seed} path="/exceptions" />
+
       <div className="page-head">
         <h2>Exception queue</h2>
         <p>
