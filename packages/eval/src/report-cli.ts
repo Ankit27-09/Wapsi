@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { KEYWORD_CLASSIFIER } from '@rc/ai';
-import { PaiseSchema, ZERO, formatINR, type Paise } from '@rc/core';
+import { PaiseSchema, ZERO, add, formatINR, type Paise } from '@rc/core';
 import { createDb, type Arm as ArmId, type Db } from '@rc/db';
 import { buildPolicy, loadPolicy, loadPriorTable } from '@rc/policy';
 import { createRng, loadTruthModel, perturbedTruth } from '@rc/simulator';
@@ -36,6 +36,8 @@ const OUT_FILE = `${OUT_DIR}/report.html`;
 interface ExceptionRow {
   readonly reasonCode: string;
   readonly verdict: string;
+  /** The bound that refused it, from `decision.refuse_rule`. */
+  readonly rule: string;
   readonly detail: string;
   readonly pBps: number;
   readonly value: Paise;
@@ -62,6 +64,7 @@ async function gatherExceptions(
       'decision.reason_code as reason_code',
       'decision.verdict as verdict',
       'decision.refuse_detail as refuse_detail',
+      'decision.refuse_rule as refuse_rule',
       'decision.ev_p_bps as ev_p_bps',
       'decision.ev_value_paise as ev_value_paise',
       'decision.ev_cost_paise as ev_cost_paise',
@@ -75,7 +78,15 @@ async function gatherExceptions(
 
   const groups = new Map<string, { rows: typeof rows; count: number }>();
   for (const row of rows) {
-    const key = `${row.reason_code}|${row.verdict}|${ruleOf(row.refuse_detail ?? '')}`;
+    // Grouped on the RECORDED rule, not on a guess parsed out of the prose.
+    //
+    // This used to call a `ruleOf(detail)` helper that matched substrings of the English
+    // explanation — "since the last attempt" means min_gap, and so on. It worked, and it was
+    // a maintenance trap: it knew nothing about consent, quiet hours, the contact ceiling,
+    // the pre-debit notice or an open promise, so every one of those landed in a bucket
+    // labelled `other` and the exception list stopped distinguishing the refusals an operator
+    // most needs to tell apart. `decision.refuse_rule` exists so this is a column read.
+    const key = `${row.reason_code}|${row.verdict}|${row.refuse_rule ?? 'unrecorded'}`;
     const group = groups.get(key) ?? { rows: [], count: 0 };
     group.count += 1;
     if (group.rows.length === 0) group.rows.push(row);
@@ -89,6 +100,7 @@ async function gatherExceptions(
       return {
         reasonCode: sample.reason_code,
         verdict: sample.verdict,
+        rule: sample.refuse_rule ?? 'unrecorded',
         detail: sample.refuse_detail ?? '',
         pBps: sample.ev_p_bps,
         value: PaiseSchema.parse(sample.ev_value_paise),
@@ -98,18 +110,6 @@ async function gatherExceptions(
       };
     })
     .sort((a, b) => b.count - a.count);
-}
-
-function ruleOf(detail: string): string {
-  if (detail.includes('since the last attempt')) return 'min_gap';
-  if (detail.includes('kill switch')) return 'kill_switch';
-  if (detail.includes('permits no attempts')) return 'terminal';
-  if (detail.includes('exceeds the schedule')) return 'attempt_cap';
-  if (detail.includes('fee budget')) return 'fee_budget';
-  if (detail.includes('below the policy floor')) return 'ev_floor';
-  if (detail.includes('smaller than the cost')) return 'ev_negative';
-  if (detail.includes('probability is zero')) return 'ev_zero';
-  return 'other';
 }
 
 /**
@@ -267,6 +267,7 @@ function render(args: RenderArgs): string {
     b0: 'B0 · do nothing',
     b1: 'B1 · retry all, immediately',
     b2: 'B2 · fixed-schedule dunning',
+    b4: 'B4 · blast reminders at everything',
     b3_oracle: 'B3 · oracle (ceiling)',
     rc: 'RC · Recovery Controller',
   };
@@ -280,7 +281,45 @@ function render(args: RenderArgs): string {
       formatINR(m.valueRecovered),
       formatINR(m.cost),
       `<strong>${formatINR(m.net)}</strong>`,
-      `<strong>${percentOfPaise(m.net, args.ceiling.net)}</strong>`,
+      // Value recovered against the oracle's, not net against net. The oracle assumes every
+      // customer is reachable and pays for messages the controller's consent bounds suppress,
+      // which made net-against-net exceed 100% on two classes — impossible for a ceiling.
+      `<strong>${percentOfPaise(m.valueRecovered, args.ceiling.valueRecovered)}</strong>`,
+    ]),
+  );
+
+  const riskClassTable = table(
+    ['risk class', 'txns', 'fired', 'recovered', 'refused', '₹ net', '₹ ceiling', '% of ceiling'],
+    args.rc.byRiskClass
+      .filter((slice) => slice.transactions > 0)
+      .map((slice) => {
+        const ceilingSlice = args.ceiling.byRiskClass.find(
+          (c) => c.riskClass === slice.riskClass,
+        );
+        return [
+          `<code>${escapeXml(slice.riskClass)}</code>`,
+          String(slice.transactions),
+          String(slice.attemptsFired),
+          `${slice.recovered}/${slice.recoverable}`,
+          String(slice.refused),
+          `<strong>${formatINR(slice.net)}</strong>`,
+          ceilingSlice === undefined ? '—' : formatINR(ceilingSlice.valueRecovered),
+          ceilingSlice === undefined
+            ? '—'
+            : `<strong>${percentOfPaise(slice.valueRecovered, ceilingSlice.valueRecovered)}</strong>`,
+        ];
+      }),
+  );
+
+  const guardrailTotal = args.rc.forgoneByRule.reduce((sum, row) => add(sum, row.forgone), ZERO);
+
+  const guardrailTable = table(
+    ['rule', 'refusals', '₹ expected recovery forgone', 'share'],
+    args.rc.forgoneByRule.map((row) => [
+      `<code>${escapeXml(row.rule)}</code>`,
+      String(row.count),
+      formatINR(row.forgone),
+      percentOfPaise(row.forgone, guardrailTotal),
     ]),
   );
 
@@ -320,11 +359,12 @@ function render(args: RenderArgs): string {
   );
 
   const exceptionsTable = table(
-    ['count', 'reason code', 'verdict', 'p', '₹ at stake', '₹ cost', '₹ net', 'why'],
+    ['count', 'reason code', 'verdict', 'rule', 'p', '₹ at stake', '₹ cost', '₹ net', 'why'],
     args.exceptions.map((row) => [
       String(row.count),
       escapeXml(row.reasonCode),
       escapeXml(row.verdict),
+      `<code>${escapeXml(row.rule)}</code>`,
       formatRate(row.pBps),
       formatINR(row.value),
       formatINR(row.cost),
@@ -369,6 +409,10 @@ function render(args: RenderArgs): string {
   td { text-align: right; padding: 8px 10px; border-bottom: 1px solid #161b22;
        font-family: ui-monospace, SFMono-Regular, monospace; }
   .detail { color: #7d8590; font-size: 12px; }
+  /* A caveat that qualifies the table above it — the definitional footnotes a reader needs
+     in order to trust a number, set quieter than the claim itself. */
+  .aside { color: #8b949e; font-size: 13.5px; border-left: 2px solid #30363d;
+           padding-left: 14px; margin: 16px 0; }
   .good { color: #3fb950; } .bad { color: #f85149; } .warn { color: #d29922; }
   .callout { border-left: 3px solid #2f81f7; background: #10161f; padding: 14px 18px;
              margin: 22px 0; border-radius: 0 6px 6px 0; }
@@ -407,16 +451,72 @@ ${armsTable}
   )}<figcaption>Net value: contribution margin recovered, minus every rupee spent.</figcaption></figure>
 
 <p>The Recovery Controller captures
-<strong>${percentOfPaise(args.rc.net, args.ceiling.net)}</strong> of what perfect play could
-have achieved. The oracle sees the per-issuer effect no real policy can observe and picks
-optimal timing per attempt, so its ${formatRate(args.ceiling.recoveryRateBps)} recovery rate
-is genuinely unreachable — which is the point of a ceiling. It turns "we beat naive retry"
+<strong>${percentOfPaise(args.rc.valueRecovered, args.ceiling.valueRecovered)}</strong> of what
+perfect play could have achieved. The oracle sees the per-issuer effect no real policy can
+observe, evaluates every timing and every intervention available, and plays optimally against
+the true outcome distribution — so its ${formatRate(args.ceiling.recoveryRateBps)} recovery
+rate is genuinely unreachable, which is the point of a ceiling. It turns "we beat naive retry"
 into a claim with a scale attached, and it makes the shortfall explicit rather than absent.</p>
+
+<p class="aside"><strong>% of ceiling is value recovered against the oracle's, not net against
+net.</strong> The oracle assumes every customer is reachable, so it sends messages the
+controller's consent bounds suppress — and pays for them. On a class where both recover the
+same transactions, that extra postage made net-against-net exceed 100%, which is impossible
+for a ceiling and was the symptom of a real definitional problem. Cost stays in the table
+beside it, where a difference in spending is visible rather than baked into the ratio.</p>
 
 <h3>Attempts fired at negative expected value</h3>
 <p>Priced against the <em>published</em> priors — the evidence available beforehand, not
 hindsight. The controller's zero is structural: the gate refuses them.</p>
 ${wasteTable}
+
+<h2>One engine, five kinds of revenue at risk</h2>
+<p>Failed payments, failed subscription cycles, lapsed mandates, abandoned checkouts and
+overdue B2B invoices. The classes differ in exactly three ways — which causes are possible,
+which interventions are legal, and how value and cost are computed — and all three were
+already inputs the expected-value gate took. So the differences are data rather than code
+paths, and every class inherits one decision path, one audit trail, one set of bounds and one
+evaluation harness.</p>
+
+<p>A single blended figure cannot tell "works across five domains" from "works on payments and
+loses money on receivables", and the aggregate is exactly where a per-class failure would
+hide. Each class is therefore reported against the oracle's ceiling <em>for that class</em>.</p>
+
+${riskClassTable}
+
+${
+    args.rc.lifetimeValuePreserved > ZERO
+      ? `<p class="aside">Plus <strong>${formatINR(args.rc.lifetimeValuePreserved)}</strong> of
+subscription value preserved beyond the recovered cycle — reported separately and never folded
+into net. Net is margin on money that has moved; that figure is margin on cycles a saved
+subscription will pay <em>if</em> it runs its expected term. It is the basis the gate priced
+on, which is why it is shown at all, but it rests on an assumption and the headline should
+not.</p>`
+      : ''
+  }
+
+<h2>What the guardrails cost</h2>
+<p>The obvious question about the table above is why the messaging-only classes trail. The
+answer is a number rather than a paragraph: every refusal records <em>which rule</em> refused
+it, and each one is valued at the expected recovery it gave up.</p>
+
+${guardrailTable}
+
+<div class="callout">
+  <strong>${formatINR(guardrailTotal)} across ${args.rc.forgoneByRule.reduce(
+    (n, row) => n + row.count,
+    0,
+  )} refusals — and most of it is consent.</strong>
+  Forty percent of the seeded customer book has either opted out or never opted in. Checkout
+  abandonment and overdue receivables recover money by messaging and nothing else — there is no
+  charge to re-present — so a customer who cannot be messaged cannot be recovered, and the
+  oracle is permitted to message them while the controller is not.
+  <br><br>
+  This is the price of the compliance envelope, not a list of bugs.
+  <code>attempt_cap</code> and <code>terminal</code> forgo exactly ₹0, which is the gate
+  working: those refusals decline actions whose expected recovery was already zero.
+  <code>ev_floor</code> is the one line here a merchant is actually free to move.
+</div>
 
 <h2>The value frontier</h2>
 <figure>${lineChart(args.frontier.points, {
