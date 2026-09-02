@@ -29,7 +29,8 @@
     "report": "pnpm build && node --env-file-if-exists=.env packages/eval/dist/report-cli.js",
     "web": "pnpm --filter @rc/web dev",
     "web:build": "pnpm build && pnpm --filter @rc/web build",
-    "verify": "pnpm typecheck && pnpm lint && pnpm lint:boundaries && pnpm test"
+    "verify": "pnpm typecheck && pnpm lint && pnpm lint:boundaries && pnpm test",
+    "razorpay": "pnpm build && node --env-file-if-exists=.env packages/razorpay/dist/cli.js"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

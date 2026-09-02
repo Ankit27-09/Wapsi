@@ -8,6 +8,7 @@
     { "path": "packages/simulator" },
     { "path": "packages/ai" },
     { "path": "packages/engine" },
-    { "path": "packages/eval" }
+    { "path": "packages/eval" },
+    { "path": "packages/razorpay" }
   ]
 }

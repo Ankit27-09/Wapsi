@@ -1,0 +1,25 @@
+{
+  "name": "@rc/razorpay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Live Razorpay client. Turns the engine's payment_link decisions into real Razorpay Payment Links, in test mode.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@rc/core": "workspace:*",
+    "@rc/db": "workspace:*",
+    "zod": "^3.24.1"
+  }
+}

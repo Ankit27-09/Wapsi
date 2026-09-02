@@ -74,6 +74,31 @@ module.exports = {
       to: { path: SIMULATOR, reachable: true },
     },
     {
+      name: 'razorpay-client-decides-nothing',
+      severity: 'error',
+      comment:
+        'The live Razorpay client executes decisions; it must never make one. Reaching ' +
+        '@rc/policy from here would let a gateway adapter read a prior, price an action, or ' +
+        'consult a bound — and the moment the thing talking to a real payment processor can ' +
+        'decide anything, "the engine decided and the client carried it out" stops being ' +
+        'true. It is also the shape of the mistake that would put decision logic in two ' +
+        'places, one of which is only exercised when the wifi works.',
+      from: { path: '^packages/razorpay' },
+      to: { path: POLICY, reachable: true },
+    },
+    {
+      name: 'no-razorpay-in-the-measurement',
+      severity: 'error',
+      comment:
+        'The evaluation must not reach the live gateway, directly or transitively. Every ' +
+        'measured claim in this project — above all a share of an achievable ceiling — ' +
+        'requires ground truth, which exists only in a world somebody wrote down. A network ' +
+        'call inside the eval path would make the headline number depend on a third party ' +
+        'being reachable, non-reproducible across runs, and no longer a measurement at all.',
+      from: { path: '^packages/(eval|simulator|policy|engine)' },
+      to: { path: '(^packages/razorpay|node_modules[\\\\/]@rc[\\\\/]razorpay)', reachable: true },
+    },
+    {
       name: 'no-unresolvable',
       severity: 'error',
       comment:
