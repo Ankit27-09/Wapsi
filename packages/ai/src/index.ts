@@ -43,3 +43,19 @@ export {
   changeIsInRange,
   createProposer,
 } from './proposer.js';
+
+export {
+  type Provider,
+  type ProviderCall,
+  type ProviderId,
+  type ProviderResolution,
+  type ProviderResult,
+  type ProviderUsage,
+  DEFAULT_MODELS,
+  PROVIDER_IDS,
+  ProviderError,
+  createGeminiProvider,
+  createGroqProvider,
+  readJson,
+  resolveProvider,
+} from './providers.js';

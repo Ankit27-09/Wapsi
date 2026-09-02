@@ -2,7 +2,9 @@ import {
   KEYWORD_CLASSIFIER,
   createLlmClassifier,
   isPricedModel,
+  resolveProvider,
   type Classifier,
+  type Provider,
 } from '@rc/ai';
 import { bps, formatINR, sub, type Paise } from '@rc/core';
 import { createDb, type Db } from '@rc/db';
@@ -35,8 +37,9 @@ import { ORACLE_CLASSIFY, runArm, type RunClassifier } from './runner.js';
  */
 
 interface Env {
-  readonly apiKey: string | undefined;
-  readonly model: string;
+  /** Null when no key is configured, with `providerProblem` saying which. */
+  readonly provider: Provider | null;
+  readonly providerProblem: string | null;
   readonly usdInrPaise: number;
   readonly confidenceFloorBps: number;
   readonly seed: number;
@@ -53,22 +56,25 @@ function readEnv(argv: readonly string[]): Env {
     flags.set(token.slice(2), value);
   }
 
-  const model = process.env['MODEL_CLASSIFY'] ?? 'claude-opus-5';
-  if (!isPricedModel(model)) {
+  // Which vendor, and which model, comes from the environment — `LLM_PROVIDER` and
+  // `LLM_MODEL`, or the first provider with a usable key. Placeholders from `.env.example`
+  // are treated as absent, so a copied example file skips the arm cleanly instead of
+  // running it and failing on authentication three minutes in.
+  const resolution = resolveProvider();
+
+  if (resolution.provider !== null && !isPricedModel(resolution.provider.model)) {
     throw new Error(
-      `MODEL_CLASSIFY is "${model}", which has no published price in @rc/ai/cost.ts. ` +
-        `Add it there rather than letting its calls cost nothing in the report.`,
+      `LLM_MODEL is "${resolution.provider.model}", which has no published price in ` +
+        `@rc/ai/cost.ts. Add it there rather than letting its calls cost nothing in the ` +
+        `report — an unpriced model makes every rupee figure here quietly wrong.`,
     );
   }
 
-  const key = process.env['ANTHROPIC_API_KEY'];
   const seedRaw = flags.get('seed') ?? process.env['EVAL_SEED'] ?? '42';
 
   return {
-    // The placeholder in .env.example must not read as a real key, or the arm would run
-    // and fail with an authentication error instead of being cleanly skipped.
-    apiKey: key === undefined || key === '' || key.endsWith('...') ? undefined : key,
-    model,
+    provider: resolution.provider,
+    providerProblem: resolution.problem,
     usdInrPaise: Number.parseInt(process.env['USD_INR_PAISE'] ?? '8800', 10),
     confidenceFloorBps: Number.parseInt(
       process.env['CLASSIFY_CONFIDENCE_FLOOR_BPS'] ?? '6000',
@@ -217,23 +223,22 @@ async function main(): Promise<void> {
       }),
     );
 
-    if (env.apiKey === undefined) {
+    if (env.provider === null) {
       process.stdout.write(
-        `  llm arm SKIPPED — no ANTHROPIC_API_KEY in .env.\n` +
-          `  Set one and re-run. Every figure the model arm would report is ABSENT from\n` +
-          `  this run rather than estimated.\n\n`,
+        `  llm arm SKIPPED — ${env.providerProblem ?? 'no provider configured'}\n\n` +
+          `  Every figure the model arm would report is ABSENT from this run rather than\n` +
+          `  estimated. The keyword arm below stands on its own.\n\n`,
       );
     } else {
       const llm = createLlmClassifier({
-        apiKey: env.apiKey,
-        model: env.model,
+        provider: env.provider,
         usdInrPaise: env.usdInrPaise,
         confidenceFloorBps: bps(env.confidenceFloorBps),
       });
 
       results.push(
         await runClassifierArm(db, env, {
-          label: `llm (${env.model})`,
+          label: `llm (${env.provider.id}:${env.provider.model})`,
           world: 'abl-llm',
           classify: (input) => llm.classify(input),
           scorer: llm,

@@ -1,4 +1,10 @@
-import { createProposer, changeIsInRange, isPricedModel, type ProposedChange } from '@rc/ai';
+import {
+  changeIsInRange,
+  createProposer,
+  isPricedModel,
+  resolveProvider,
+  type ProposedChange,
+} from '@rc/ai';
 import { formatINR, paise } from '@rc/core';
 import { createDb, type Db } from '@rc/db';
 import { buildPolicy, loadPolicy, loadPriorTable, type Policy } from '@rc/policy';
@@ -143,17 +149,11 @@ function evaluateOnHoldout(
 // ---------------------------------------------------------------------------
 
 async function generate(db: Db, args: Args, policy: Policy): Promise<void> {
-  const model = process.env['MODEL_PROPOSE'] ?? 'claude-opus-5';
-  if (!isPricedModel(model)) {
-    throw new Error(`MODEL_PROPOSE is "${model}", which has no published price.`);
-  }
+  const resolution = resolveProvider();
 
-  const key = process.env['ANTHROPIC_API_KEY'];
-  const apiKey = key === undefined || key === '' || key.endsWith('...') ? undefined : key;
-
-  if (apiKey === undefined) {
+  if (resolution.provider === null) {
     process.stdout.write(
-      `\n  No ANTHROPIC_API_KEY — the proposal agent cannot run.\n` +
+      `\n  The proposal agent cannot run: ${resolution.problem ?? 'no provider'}\n\n` +
         `  The bounded-change mechanism is still real and testable without it: see\n` +
         `  packages/ai/src/proposer.ts, where the safety bounds are absent from the\n` +
         `  output schema rather than merely discouraged in the prompt.\n\n`,
@@ -161,12 +161,20 @@ async function generate(db: Db, args: Args, policy: Policy): Promise<void> {
     return;
   }
 
+  const provider = resolution.provider;
+  if (!isPricedModel(provider.model)) {
+    throw new Error(
+      `LLM_MODEL is "${provider.model}", which has no published price in @rc/ai/cost.ts.`,
+    );
+  }
+
   const evidence = await gatherEvidence(db, { seed: args.seed, arm: 'rc', world: 'base' });
-  process.stdout.write(`  ${evidence.decisions} decisions summarised for the agent.\n\n`);
+  process.stdout.write(
+    `  ${evidence.decisions} decisions summarised for ${provider.id}:${provider.model}.\n\n`,
+  );
 
   const proposer = createProposer({
-    apiKey,
-    model,
+    provider,
     usdInrPaise: Number.parseInt(process.env['USD_INR_PAISE'] ?? '8800', 10),
   });
 

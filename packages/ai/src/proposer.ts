@@ -1,8 +1,7 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { jsonSchemaOutputFormat } from '@anthropic-ai/sdk/helpers/json-schema';
 import { z } from 'zod';
 import { REASON_CODES, ZERO, bpsFromUnit, type Bps, type Paise } from '@rc/core';
 import { modelCallCost } from './cost.js';
+import { readJson, type Provider } from './providers.js';
 
 /**
  * THE POLICY-PROPOSAL AGENT
@@ -142,10 +141,9 @@ export interface ProposalResult {
 }
 
 export interface ProposerOptions {
-  readonly apiKey: string;
-  readonly model: string;
+  /** The provider to call. Built by `resolveProvider` from the environment. */
+  readonly provider: Provider;
   readonly usdInrPaise: number;
-  readonly client?: Anthropic;
 }
 
 const SYSTEM_PROMPT = [
@@ -184,7 +182,8 @@ const SYSTEM_PROMPT = [
 export function createProposer(options: ProposerOptions): {
   propose(evidence: ProposalEvidence): Promise<ProposalResult>;
 } {
-  const client = options.client ?? new Anthropic({ apiKey: options.apiKey });
+  const { provider } = options;
+  const label = `${provider.id}:${provider.model}`;
 
   return {
     async propose(evidence: ProposalEvidence): Promise<ProposalResult> {
@@ -199,61 +198,46 @@ export function createProposer(options: ProposerOptions): {
         .join('\n');
 
       try {
-        const response = await client.messages.parse({
-          model: options.model,
-          // Generous, and it has to be. Adaptive thinking is on by default at this model
-          // tier and its tokens count against this cap — at 4096 the reasoning consumed the
-          // budget and the JSON came back truncated mid-string, which surfaces as a parse
-          // failure rather than as anything that says "out of room".
-          max_tokens: 16_000,
-          system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-          // Higher effort than classification: this reads a batch summary and has to reason
-          // about which of several plausible changes the evidence actually supports.
-          output_config: {
-            effort: 'high',
-            format: jsonSchemaOutputFormat(PROPOSAL_JSON_SCHEMA),
-          },
-          messages: [
-            {
-              role: 'user',
-              content: [
-                {
-                  type: 'text',
-                  text: [
-                    `Policy version ${evidence.policyVersion}.`,
-                    '',
-                    'TUNABLE PARAMETERS',
-                    ranges,
-                    '',
-                    'WHAT THE BATCH DID',
-                    evidence.batchSummary,
-                  ].join('\n'),
-                },
-              ],
-            },
-          ],
+        const response = await provider.complete({
+          systemPrompt: SYSTEM_PROMPT,
+          userMessage: [
+            `Policy version ${evidence.policyVersion}.`,
+            '',
+            'TUNABLE PARAMETERS',
+            ranges,
+            '',
+            'WHAT THE BATCH DID',
+            evidence.batchSummary,
+            '',
+            'Reply with a single JSON object and nothing else:',
+            JSON.stringify(PROPOSAL_JSON_SCHEMA),
+          ].join('\n'),
+          // Generous, and it has to be. Some tiers emit reasoning tokens that count against
+          // this cap — at 4096 the reasoning consumed the budget and the JSON came back
+          // truncated mid-string, which surfaces as a parse failure rather than as anything
+          // that says "out of room".
+          maxTokens: 16_000,
         });
 
-        const usage = response.usage;
         const cost = modelCallCost(
-          options.model,
+          provider.model,
           {
-            inputTokens: usage.input_tokens,
-            outputTokens: usage.output_tokens,
-            cacheReadTokens: usage.cache_read_input_tokens ?? 0,
-            cacheWriteTokens: usage.cache_creation_input_tokens ?? 0,
+            inputTokens: response.usage.inputTokens,
+            outputTokens: response.usage.outputTokens,
+            cacheReadTokens: response.usage.cacheReadTokens,
+            cacheWriteTokens: response.usage.cacheWriteTokens,
           },
           options.usdInrPaise,
         );
 
-        const parsed = ProposalSchema.safeParse(response.parsed_output);
+        const parsed = ProposalSchema.safeParse(readJson(response.text));
         if (!parsed.success) {
           return {
             proposal: null,
             error: `Proposal failed validation: ${parsed.error.issues
               .map((issue) => `${issue.path.join('.')} ${issue.message}`)
               .join('; ')}`,
-            model: options.model,
+            model: label,
             costPaise: cost,
             confidenceBps: bpsFromUnit(0),
             latencyMs: Math.round(performance.now() - started),
@@ -263,7 +247,7 @@ export function createProposer(options: ProposerOptions): {
         return {
           proposal: parsed.data,
           error: null,
-          model: options.model,
+          model: label,
           costPaise: cost,
           confidenceBps: bpsFromUnit(parsed.data.confidence),
           latencyMs: Math.round(performance.now() - started),
@@ -272,7 +256,7 @@ export function createProposer(options: ProposerOptions): {
         return {
           proposal: null,
           error: error instanceof Error ? error.message : String(error),
-          model: options.model,
+          model: label,
           costPaise: ZERO,
           confidenceBps: bpsFromUnit(0),
           latencyMs: Math.round(performance.now() - started),

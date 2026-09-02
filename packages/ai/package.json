@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Classification. The LLM's entire contribution to the system, and the only package that talks to a model.",
+  "description": "Classification and policy proposals. The model's entire contribution to the system, behind a provider layer — Gemini or Groq over plain fetch, with every response validated.",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -12,13 +12,14 @@
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc --build",
     "test": "vitest run"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.121.0",
     "@rc/core": "workspace:*",
     "@rc/db": "workspace:*",
     "zod": "^3.24.1"

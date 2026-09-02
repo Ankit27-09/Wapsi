@@ -11,16 +11,23 @@ import { ZERO, paise, type Paise } from '@rc/core';
  * paise-per-million-tokens (an integer), and per-call cost is then a bigint multiply and
  * divide — no float touches a figure that reaches the report.
  *
- * Published per-token prices, USD per million tokens (Anthropic first-party rates):
- *
- *   claude-opus-5     $5 in  / $25 out
- *   claude-sonnet-5   $2 in  / $10 out
- *   claude-haiku-4-5  $1 in  / $5  out
- *
  * Cache reads bill at roughly 0.1× the input rate and cache writes at roughly 1.25×.
  * Both are applied below, because a cost model that ignored caching would overstate spend
  * by an order of magnitude on the classification path — where the taxonomy prefix is
  * identical on every call in a batch and is exactly what caching exists for.
+ *
+ * ON THE FIGURES BELOW, because this project does not present estimates as measurements.
+ *
+ * These are published list prices in USD per million tokens, recorded when this table was
+ * written. Vendor pricing moves, and the free tiers most of these have mean a run may cost
+ * nothing at all while this table still reports a figure — so what the report shows is
+ * MODELLED spend at list rate, not a bill. That is the honest reading and it is the useful
+ * one for the ablation, which asks what the model would be worth to a merchant paying for
+ * it rather than what one run happened to cost a student on a free tier.
+ *
+ * A model missing from this table fails at startup rather than being priced at zero. An
+ * unpriced model would make every rupee figure in the ablation quietly wrong, which is worse
+ * than refusing to run.
  */
 
 interface Price {
@@ -29,6 +36,19 @@ interface Price {
 }
 
 const PRICES: Readonly<Record<string, Price>> = {
+  // --- Google, via the Gemini API ---
+  'gemini-2.5-flash': { inputUsdPerMTok: 0.3, outputUsdPerMTok: 2.5 },
+  'gemini-2.5-flash-lite': { inputUsdPerMTok: 0.1, outputUsdPerMTok: 0.4 },
+  'gemini-2.5-pro': { inputUsdPerMTok: 1.25, outputUsdPerMTok: 10 },
+  'gemini-2.0-flash': { inputUsdPerMTok: 0.1, outputUsdPerMTok: 0.4 },
+
+  // --- Groq ---
+  'llama-3.3-70b-versatile': { inputUsdPerMTok: 0.59, outputUsdPerMTok: 0.79 },
+  'llama-3.1-8b-instant': { inputUsdPerMTok: 0.05, outputUsdPerMTok: 0.08 },
+  'openai/gpt-oss-120b': { inputUsdPerMTok: 0.15, outputUsdPerMTok: 0.75 },
+  'openai/gpt-oss-20b': { inputUsdPerMTok: 0.1, outputUsdPerMTok: 0.5 },
+
+  // --- Anthropic, kept because the ablation can still be pointed at it ---
   'claude-opus-5': { inputUsdPerMTok: 5, outputUsdPerMTok: 25 },
   'claude-fable-5': { inputUsdPerMTok: 10, outputUsdPerMTok: 50 },
   'claude-sonnet-5': { inputUsdPerMTok: 2, outputUsdPerMTok: 10 },
