@@ -135,6 +135,87 @@ export const FAILURE_STRINGS: Readonly<Record<ReasonCode, readonly FailureString
     ...OPAQUE.slice(0, 1),
   ],
 
+  // --- checkout abandonment -------------------------------------------------
+  // A different DIALECT, not just different words. These come from front-end analytics and
+  // session telemetry — event names, funnel steps, machine identifiers — rather than issuer
+  // prose. A classifier tuned only on payment declines has no purchase on them, which is
+  // exactly why the ablation gets more informative once this class exists.
+
+  abandoned_at_cart: [
+    s('cart_abandoned', 'easy', 'CART_ABANDONED'),
+    s('session ended with items in cart, no checkout started', 'easy'),
+    s('funnel_exit step=cart items=3', 'hard'),
+    s('CHECKOUT_NOT_INITIATED ttl_expired', 'hard'),
+    s('user chala gaya, cart mein saman tha', 'hard'),
+    ...OPAQUE.slice(0, 2),
+  ],
+  abandoned_at_address: [
+    s('abandoned at address entry', 'easy'),
+    s('shipping details incomplete, session dropped', 'easy'),
+    s('funnel_exit step=address', 'hard'),
+    s('CHECKOUT_STEP_2_EXIT delivery_fee_shown=true', 'hard'),
+    ...OPAQUE.slice(0, 1),
+  ],
+  abandoned_at_payment: [
+    s('abandoned at payment method selection', 'easy'),
+    s('customer did not choose a payment method', 'easy'),
+    s('funnel_exit step=payment_method', 'hard'),
+    s('PG_PAGE_EXIT no_method_selected', 'hard'),
+    s('payment page se wapas chala gaya', 'hard'),
+    ...OPAQUE.slice(0, 2),
+  ],
+  abandoned_at_otp: [
+    s('abandoned at OTP entry', 'easy'),
+    s('customer reached authentication and did not complete it', 'easy'),
+    s('funnel_exit step=otp attempts=0', 'hard'),
+    s('ACS_PAGE_ABANDONED otp_requested=true otp_entered=false', 'hard'),
+    s('otp aaya nahi, customer chala gaya', 'hard'),
+    ...OPAQUE.slice(0, 1),
+  ],
+
+  // --- overdue receivables --------------------------------------------------
+  // A third dialect: what a finance team types into an AR ledger, or replies in an email
+  // thread. Free-form human prose rather than machine output — where a rule table struggles
+  // most and a model earns its place.
+
+  awaiting_approval: [
+    s('invoice pending approval', 'easy'),
+    s('with the finance team for sign-off', 'easy'),
+    s('AP_HOLD awaiting_approver', 'hard'),
+    s('routed to cost centre owner, not yet approved', 'hard'),
+    s('approval mein atka hua hai', 'hard'),
+    ...OPAQUE.slice(0, 1),
+  ],
+  disputed_line_item: [
+    s('buyer disputes line item 4', 'easy'),
+    s('customer says the quantity on the invoice is wrong', 'easy'),
+    s('DISPUTE_RAISED ref=INV-8821 lines=[4]', 'hard'),
+    s('short-paid, pending credit note', 'hard'),
+    ...OPAQUE.slice(0, 1),
+  ],
+  payment_run_cycle: [
+    s('missed the monthly payment run', 'easy'),
+    s('buyer pays on the 25th, invoice arrived after cut-off', 'easy'),
+    s('AP_CYCLE_MISS next_run=25', 'hard'),
+    s('will be included in the next batch payment', 'hard'),
+    s('agle payment cycle mein aayega', 'hard'),
+    ...OPAQUE.slice(0, 1),
+  ],
+  no_response: [
+    s('no response to reminders', 'easy'),
+    s('three emails sent, no reply', 'easy'),
+    s('NO_CONTACT_45D', 'hard'),
+    s('unreachable on registered contact', 'hard'),
+    ...OPAQUE.slice(0, 2),
+  ],
+  promised_not_paid: [
+    s('promised payment date passed without payment', 'easy'),
+    s('committed to pay by the 10th, nothing received', 'easy'),
+    s('PTP_BROKEN promised=2026-06-10', 'hard'),
+    s('bola tha pay karenge, nahi kiya', 'hard'),
+    ...OPAQUE.slice(0, 1),
+  ],
+
   // Never rendered from a true cause — `unknown` is a classifier verdict, not a
   // gateway state. The generator reaches for NOVEL_STRINGS instead.
   unknown: [],

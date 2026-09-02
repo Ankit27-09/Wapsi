@@ -28,7 +28,9 @@ export {
   countRecentContacts,
   loadAttemptHistory,
   loadConsent,
+  loadOpenPromise,
   loadPlanContext,
+  loadPreDebitNoticeAt,
   loadTemplate,
   loadTxnContext,
 } from './repository.js';

@@ -1,5 +1,5 @@
 import { ZERO, formatINR, sub } from '@rc/core';
-import { loadArms, loadByReasonCode, SEED } from '../lib/queries';
+import { loadArms, loadByReasonCode, loadByRiskClass, SEED } from '../lib/queries';
 
 function rate(bps: number): string {
   return `${(bps / 100).toFixed(1)}%`;
@@ -23,10 +23,21 @@ export default async function Overview() {
 
   const rc = arms.find((a) => a.arm === 'rc');
   const ceiling = arms.find((a) => a.arm === 'b3_oracle');
-  const bestBaseline = arms
-    .filter((a) => a.arm !== 'rc' && a.arm !== 'b3_oracle')
-    .reduce((best, a) => (a.net > best.net ? a : best), arms[0]!);
 
+  // Seeded from the FILTERED list, not from `arms[0]`.
+  //
+  // The reduce previously started at `arms[0]!` — whichever arm the query happened to return
+  // first, which is `b0` in practice but could be the controller or the oracle. Since the
+  // seed participates in the comparison, "best baseline" could have reported the
+  // controller's own net value as the bar it beat. The non-null assertion is what let that
+  // through review: it silenced the question of what happens when there are no baselines.
+  const baselines = arms.filter((a) => a.arm !== 'rc' && a.arm !== 'b3_oracle');
+  const bestBaseline = baselines.reduce<(typeof baselines)[number] | undefined>(
+    (best, a) => (best === undefined || a.net > best.net ? a : best),
+    undefined,
+  );
+
+  const byClass = await loadByRiskClass();
   const byCode = await loadByReasonCode();
   const maxActivity = Math.max(...byCode.map((c) => c.fired + c.refused), 1);
 
@@ -127,6 +138,46 @@ export default async function Overview() {
         genuinely unreachable — which is the point of having one. It turns “we beat naive
         retry” into a claim with a scale attached, and it makes the shortfall explicit rather
         than absent.
+      </div>
+
+      <h3>By risk class</h3>
+      <p className="section-note">
+        One engine, five kinds of revenue at risk. The classes differ in exactly three ways —
+        which causes are possible, which interventions are legal, and how value and cost are
+        computed — and all three are inputs the expected-value gate already took, which is why
+        there is one decision path rather than five systems. A single blended net figure cannot
+        tell “works across five domains” from “works on payments and loses money on
+        receivables”, so it is broken out here.
+      </p>
+      <div className="wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Risk class</th>
+              <th>Txns</th>
+              <th>Fired</th>
+              <th>Recovered</th>
+              <th>Refused</th>
+              <th>Value recovered</th>
+              <th>Cost</th>
+              <th>Net</th>
+            </tr>
+          </thead>
+          <tbody>
+            {byClass.map((row) => (
+              <tr key={row.riskClass}>
+                <td className="mono">{row.riskClass}</td>
+                <td>{row.transactions}</td>
+                <td>{row.fired}</td>
+                <td className={row.recovered > 0 ? 'good' : 'dim'}>{row.recovered}</td>
+                <td className="dim">{row.refused}</td>
+                <td>{formatINR(row.valueRecovered)}</td>
+                <td>{formatINR(row.cost)}</td>
+                <td className={row.net > 0n ? 'good' : 'dim'}>{formatINR(row.net)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
 
       <h3>By failure cause</h3>

@@ -1,7 +1,24 @@
-import { ZERO, bps, isTerminal, type Bps, type Paise, type ReasonCode } from '@rc/core';
+import {
+  RISK_CLASS_META,
+  ZERO,
+  bps,
+  mayEverContact,
+  type Bps,
+  type Paise,
+  type Rail,
+  type ReasonCode,
+  type RiskClass,
+} from '@rc/core';
 import type { Arm as ArmId } from '@rc/db';
 import { planNext, type Plan, type PlanInput } from '@rc/engine';
-import { TIMINGS, evGate, type PriorTable, type Timing } from '@rc/policy';
+import {
+  PRIOR_KINDS,
+  TIMINGS,
+  evGate,
+  type PriorKind,
+  type PriorTable,
+  type Timing,
+} from '@rc/policy';
 import type { TruthModel } from '@rc/simulator';
 
 /**
@@ -62,9 +79,24 @@ function priorOrZero(
   code: ReasonCode,
   attempt: number,
   timing: Timing,
+  kind: PriorKind = 'charge',
 ): Bps {
-  const lookup = priors.prior(code, attempt, timing);
+  const lookup = priors.prior(code, attempt, timing, kind);
   return lookup.kind === 'prior' ? lookup.pBps : bps(0);
+}
+
+/**
+ * Whether a charge is even possible for this class.
+ *
+ * The retry baselines fire on everything WITHIN THE DOMAIN THEY EXIST IN, and that domain is
+ * payments. An abandoned checkout has no instrument to re-present and an invoice is not a
+ * card, so making B1 and B2 "retry" those would not be naive — it would be a strawman that
+ * spends fees on physically impossible actions and flatters the controller by comparison.
+ *
+ * The honest baseline for the messaging classes is B4 below.
+ */
+function canCharge(riskClass: RiskClass): boolean {
+  return RISK_CLASS_META[riskClass].interventions.includes('retry');
 }
 
 /**
@@ -84,6 +116,11 @@ function priceAction(
   const arithmetic = evGate({
     amount: input.amount,
     marginBps: input.marginBps,
+    // ONE cycle, even on a subscription, and this is not an oversight. A fixed retry rule
+    // does not know a subscription from a one-off — that knowledge is precisely what the
+    // controller has and the baseline does not. Giving the baseline the lifetime multiplier
+    // would hand it half the controller's advantage for free.
+    valueCycles: 1,
     pBps: priorOrZero(priors, input.reasonCode, attempt, timing),
     gatewayFee: policy.gatewayFee(input.currentRail),
     // Zero, because the baselines never contact anyone — the plan below sets
@@ -146,7 +183,9 @@ export const RETRY_ALL_IMMEDIATELY: Arm = {
     'A single immediate re-present on every failure, regardless of cause. Isolates ' +
     'whether the value is in retrying at all, or in choosing what and when to retry.',
   plan: (input, context) =>
-    input.attemptNo === 1 ? priceAction(input, context.priors, 1, 'immediate') : null,
+    input.attemptNo === 1 && canCharge(input.riskClass)
+      ? priceAction(input, context.priors, 1, 'immediate')
+      : null,
 };
 
 /**
@@ -172,7 +211,83 @@ export const FIXED_SCHEDULE_DUNNING: Arm = {
     'budget as the controller, no diagnosis — so the gap between them is the value of ' +
     'targeting rather than of persistence.',
   plan: (input, context) =>
-    input.attemptNo > 3 ? null : priceAction(input, context.priors, input.attemptNo, 'next_day'),
+    input.attemptNo > 3 || !canCharge(input.riskClass)
+      ? null
+      : priceAction(input, context.priors, input.attemptNo, 'next_day'),
+};
+
+/**
+ * Blast the same reminder at everything, three times.
+ *
+ * THE BASELINE THE MESSAGING CLASSES NEED, and the exact analogue of B2 for the domains
+ * where there is nothing to charge. Checkout abandonment and overdue receivables cannot be
+ * retried, so B1 and B2 sit them out — and without this arm the controller's results there
+ * would only be measurable against doing nothing, which is a much easier bar.
+ *
+ * What it does is what an off-the-shelf abandoned-cart or dunning tool does: one generic
+ * message per transaction on a fixed cadence, no diagnosis, no expected-value gate, no
+ * contact ceiling. The gap between this and the controller is therefore the value of
+ * TARGETING — knowing that an OTP drop-off is worth chasing within minutes and a browsing
+ * cart may not be worth chasing at all.
+ *
+ * It does respect `never_contact`. A baseline that messaged fraud-flagged customers would be
+ * cheaper to beat and would not correspond to anything anyone could actually run, so the
+ * comparison would be worthless in the one direction it must not be.
+ */
+export const BLAST_ALL_REMINDERS: Arm = {
+  id: 'b4',
+  label: 'Blast reminders at everything',
+  description:
+    'Three generic reminders per transaction on a fixed cadence, no diagnosis and no ' +
+    'expected-value gate — what an off-the-shelf abandoned-cart or dunning tool does. The ' +
+    'targeting baseline for the classes that cannot be retried.',
+
+  plan: (input, context) => {
+    if (input.attemptNo > 3) return null;
+    if (!mayEverContact(input.reasonCode)) return null;
+
+    // No registered template means no message, and this arm is nothing BUT a message — so
+    // there is no action to take. Returning a `fire` with nothing sent would have the
+    // simulator draw an outcome for a reminder that never existed, which is the same bug the
+    // controller had and would inflate the baseline instead.
+    if (input.template === null || !input.template.registered) return null;
+
+    // Priced as `notify`, which is what it is: one message, no fee. The prior consulted is
+    // the published one for a notify at this timing, and it is usually MISSING — the table
+    // has no belief about sending a generic reminder to an abandoned cart, because nobody
+    // schedules that. Zero-for-missing is the honest price of an action with no evidence
+    // behind it, and it is how the report quantifies untargeted messaging as waste.
+    const timing: Timing = input.attemptNo === 1 ? 'next_day' : 'payment_run_window';
+    const messageCost = input.policy.messageCost('sms');
+
+    const arithmetic = evGate({
+      amount: input.amount,
+      marginBps: input.marginBps,
+      valueCycles: 1,
+      pBps: priorOrZero(context.priors, input.reasonCode, input.attemptNo, timing, 'notify'),
+      gatewayFee: ZERO,
+      messageCost,
+      llmCost: ZERO,
+      floor: ZERO,
+    }).arithmetic;
+
+    return {
+      kind: 'fire',
+      action: 'notify',
+      rail: input.currentRail,
+      timing,
+      ev: arithmetic,
+      // Consent, quiet hours and the weekly ceiling are all ignored — that is what makes
+      // this a naive baseline. Template registration is not, because it is a legal
+      // constraint rather than a policy preference, and a baseline that sent unregistered
+      // templates would not correspond to anything anyone could run.
+      contact: {
+        send: true,
+        channel: input.template.channel,
+        templateId: input.template.id,
+      },
+    };
+  },
 };
 
 /**
@@ -204,70 +319,164 @@ export const ORACLE: Arm = {
       );
     }
 
-    // Physics, not economics. Nothing recovers an expired card.
-    if (isTerminal(input.reasonCode)) return null;
-
     // A budget the oracle also has to respect: a ceiling that could spend without limit
     // would not be a ceiling for a bounded system.
     if (input.attemptNo > 3) return null;
 
-    let best: { readonly timing: Timing; readonly net: Paise } | null = null;
+    // NOTE ON WHAT THIS USED TO SAY.
+    //
+    // The line here was `if (isTerminal(input.reasonCode)) return null` — physics, not
+    // economics, nothing recovers an expired card. True for a RETRY, and it became badly
+    // wrong the moment the system modelled anything else: all nine of the checkout and
+    // receivable causes are terminal, because nothing was ever charged. So the oracle would
+    // have declined to act on every one of them, the ceiling for four of the five risk
+    // classes would have been exactly zero, and "we captured X% of what was achievable"
+    // would have read as 100% — or divided by zero — precisely where the new work happens.
+    //
+    // The correct statement is per (class, intervention): the search below simply skips any
+    // action whose TRUE probability is zero, which covers expired cards and revoked mandates
+    // without also writing off the eight-paise nudge that recovers an abandoned cart.
 
-    for (const timing of TIMINGS) {
-      const rail = timing === 'alt_rail' ? 'upi_intent' : input.currentRail;
+    const legal = RISK_CLASS_META[input.riskClass].interventions;
+    const messageCost = input.policy.messageCost('sms');
+
+    /**
+     * A CEILING BOUNDED BY LAW, NOT BY PREFERENCE.
+     *
+     * The oracle ignores every constraint that is a merchant's risk preference — the
+     * expected-value floor, the attempt cap, the weekly contact ceiling — because those are
+     * choices, and a ceiling exists to measure what was left on the table by choosing.
+     *
+     * It does NOT ignore the pre-debit notification. That is not a preference; it is the
+     * condition under which an e-mandate debit is lawful at all. An oracle that debits
+     * without notice is not a ceiling, it is a fantasy — and reporting the controller as a
+     * percentage of a fantasy understates it by comparing it against something nobody is
+     * permitted to do. Before this check, the controller measured 34.6% of the subscription
+     * ceiling; the missing two thirds were charges the oracle was not entitled to make.
+     */
+    const chargeIsLawful =
+      !input.mandateBacked ||
+      (input.hoursSincePreDebitNotice !== null &&
+        input.hoursSincePreDebitNotice >= input.policy.preDebitNoticeHours);
+
+    interface Candidate {
+      readonly timing: Timing;
+      readonly kind: PriorKind;
+      readonly action: 'retry' | 'switch_rail' | 'payment_link' | 'notify' | 'pre_debit_notify' | 'remandate';
+      readonly rail: Rail;
+      readonly net: Paise;
+    }
+
+    const priceOracle = (
+      timing: Timing,
+      kind: PriorKind,
+      rail: Rail,
+    ): { readonly pBps: Bps; readonly net: Paise; readonly passes: boolean } => {
       const pBps = truth.model.successProbability(
         input.reasonCode,
         input.attemptNo,
         timing,
         truth.issuerId,
+        kind,
       );
-      if (pBps === 0) continue;
-
       const verdict = evGate({
         amount: input.amount,
         marginBps: input.marginBps,
+        // The oracle sees the true horizon too. Withholding it would understate the ceiling
+        // and flatter the controller against it.
+        valueCycles: RISK_CLASS_META[input.riskClass].recurring
+          ? (input.lifetimeCycles ?? input.policy.defaultLifetimeCycles)
+          : 1,
         pBps,
-        gatewayFee: input.policy.gatewayFee(rail),
-        messageCost: ZERO,
+        gatewayFee: kind === 'charge' ? input.policy.gatewayFee(rail) : ZERO,
+        messageCost: kind === 'charge' ? ZERO : messageCost,
         llmCost: ZERO,
         // Fires on any positive expected value. The policy's floor is a risk preference;
         // the ceiling is what a perfectly informed actor could extract.
         floor: ZERO,
       });
+      return {
+        pBps,
+        net: verdict.arithmetic.net,
+        passes: verdict.kind === 'pass',
+      };
+    };
 
-      if (verdict.kind !== 'pass') continue;
-      if (best === null || verdict.arithmetic.net > best.net) {
-        best = { timing, net: verdict.arithmetic.net };
+    let best: Candidate | null = null;
+
+    for (const timing of TIMINGS) {
+      for (const kind of PRIOR_KINDS) {
+        // A `charge` kind covers both retry and switch_rail; `alt_rail` is what makes it the
+        // latter, which is the same convention the prior table uses.
+        const action =
+          kind === 'charge' ? (timing === 'alt_rail' ? 'switch_rail' : 'retry') : kind;
+        if (!legal.includes(action)) continue;
+        if (kind === 'charge' && !chargeIsLawful) continue;
+        // A non-charging action is a message. With no registered template there is no
+        // message and therefore no action — even for a ceiling, since an unregistered
+        // template cannot lawfully be sent by anybody.
+        if (kind !== 'charge' && (input.template === null || !input.template.registered)) {
+          continue;
+        }
+
+        const rail = timing === 'alt_rail' ? 'upi_intent' : input.currentRail;
+        const priced = priceOracle(timing, kind, rail);
+        if (priced.pBps === 0 || !priced.passes) continue;
+
+        if (best === null || priced.net > best.net) {
+          best = { timing, kind, action, rail, net: priced.net };
+        }
       }
     }
 
     if (best === null) return null;
 
-    const rail = best.timing === 'alt_rail' ? 'upi_intent' : input.currentRail;
+    const chosen = priceOracle(best.timing, best.kind, best.rail);
+
     return {
       kind: 'fire',
-      action: best.timing === 'alt_rail' ? 'switch_rail' : 'retry',
-      rail,
+      action: best.action,
+      rail: best.rail,
       timing: best.timing,
       ev: evGate({
         amount: input.amount,
         marginBps: input.marginBps,
-        pBps: truth.model.successProbability(
-          input.reasonCode,
-          input.attemptNo,
-          best.timing,
-          truth.issuerId,
-        ),
-        gatewayFee: input.policy.gatewayFee(rail),
-        messageCost: ZERO,
+        valueCycles: RISK_CLASS_META[input.riskClass].recurring
+          ? (input.lifetimeCycles ?? input.policy.defaultLifetimeCycles)
+          : 1,
+        pBps: chosen.pBps,
+        gatewayFee: best.kind === 'charge' ? input.policy.gatewayFee(best.rail) : ZERO,
+        messageCost: best.kind === 'charge' ? ZERO : messageCost,
         llmCost: ZERO,
         floor: ZERO,
       }).arithmetic,
-      contact: {
-        send: false,
-        blockedBy: 'not_scheduled',
-        detail: 'The oracle measures the recovery ceiling; it does not message customers.',
-      },
+      // A non-charging action IS the message, so the oracle has to send it — and pay for it.
+      //
+      // Not cosmetic. A pre-debit notice that was never delivered does not make the debit
+      // 24 hours later lawful, and the notice is read back from `message_send` rather than
+      // from the decision that planned it. An oracle that priced the notice and skipped
+      // sending it would find every subsequent charge refused, and the subscription ceiling
+      // would collapse to whatever a message alone recovers.
+      //
+      // What the ceiling therefore assumes, stated plainly: every customer is reachable.
+      // Consent, quiet hours and the weekly ceiling are merchant-side preferences the oracle
+      // is entitled to ignore, so this is a generous ceiling — in the direction that makes
+      // the controller's share of it a conservative claim rather than a flattering one.
+      contact:
+        best.kind === 'charge' || input.template === null || !input.template.registered
+          ? {
+              send: false,
+              blockedBy: best.kind === 'charge' ? 'not_scheduled' : 'no_template',
+              detail:
+                best.kind === 'charge'
+                  ? 'A charge sends no message.'
+                  : 'No registered template exists for this cause, so even the ceiling cannot send.',
+            }
+          : {
+              send: true,
+              channel: input.template.channel,
+              templateId: input.template.id,
+            },
     };
   },
 };
@@ -276,6 +485,7 @@ export const ARMS: readonly Arm[] = [
   DO_NOTHING,
   RETRY_ALL_IMMEDIATELY,
   FIXED_SCHEDULE_DUNNING,
+  BLAST_ALL_REMINDERS,
   ORACLE,
   RECOVERY_CONTROLLER,
 ];

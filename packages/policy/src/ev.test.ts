@@ -28,10 +28,13 @@ const anyAmount = fc.bigInt({ min: 1n, max: 50_000_000n }).map(paise);
 const anyBpsValue = fc.integer({ min: 0, max: BPS_ONE }).map(bps);
 const anyCost = fc.bigInt({ min: 0n, max: 100_000n }).map(paise);
 const anyFloor = fc.bigInt({ min: 0n, max: 500_000n }).map(paise);
+/** A recurring horizon, plus 1 for the one-off case that is most of the population. */
+const anyCycles = fc.integer({ min: 1, max: 24 });
 
 const anyInput: fc.Arbitrary<EvInput> = fc.record({
   amount: anyAmount,
   marginBps: anyBpsValue,
+  valueCycles: anyCycles,
   pBps: anyBpsValue,
   gatewayFee: anyCost,
   messageCost: anyCost,
@@ -59,7 +62,9 @@ describe('evGate — the verdict is exactly its definition', () => {
       fc.property(anyInput, (input) => {
         const { arithmetic } = evGate(input);
 
-        expect(arithmetic.value).toBe(mulBps(input.amount, input.marginBps));
+        expect(arithmetic.value).toBe(
+          mulBps(input.amount, input.marginBps) * BigInt(input.valueCycles),
+        );
         expect(arithmetic.cost).toBe(
           add(add(input.gatewayFee, input.messageCost), input.llmCost),
         );
@@ -81,6 +86,46 @@ describe('evGate — the verdict is exactly its definition', () => {
   });
 });
 
+describe('evGate — the recurring horizon', () => {
+  it('scales the value at stake linearly in the cycle count', () => {
+    // The mechanism that makes a ₹499 subscription cycle worth more effort than a ₹499
+    // one-off. Asserted as exact linearity rather than as "bigger", because the whole
+    // justification for spending more is that the amount at risk really is N times larger —
+    // a monotone-but-sublinear implementation would be a different, unstated claim.
+    fc.assert(
+      fc.property(anyInput, anyCycles, (input, cycles) => {
+        const one = evGate({ ...input, valueCycles: 1 }).arithmetic;
+        const many = evGate({ ...input, valueCycles: cycles }).arithmetic;
+
+        expect(many.value).toBe(one.value * BigInt(cycles));
+        // Cost is a property of the ACTION, not of the horizon. A retry on a subscription
+        // costs one gateway fee however many cycles it protects, and that asymmetry is
+        // precisely why the horizon changes the decision.
+        expect(many.cost).toBe(one.cost);
+      }),
+    );
+  });
+
+  it('refuses a fractional or zero horizon rather than silently truncating it', () => {
+    // A float here would reintroduce floating-point into every expected value in the system
+    // through the value term — the one place the discipline is easiest to lose, because
+    // "cycles" sounds like a count rather than like money.
+    const base = {
+      amount: paiseFromRupeeString('499.00'),
+      marginBps: bps(2600),
+      pBps: bps(4000),
+      gatewayFee: ZERO,
+      messageCost: ZERO,
+      llmCost: ZERO,
+      floor: ZERO,
+    };
+
+    expect(() => evGate({ ...base, valueCycles: 0 })).toThrow(/positive integer/);
+    expect(() => evGate({ ...base, valueCycles: 2.5 })).toThrow(/positive integer/);
+    expect(() => evGate({ ...base, valueCycles: -1 })).toThrow(/positive integer/);
+  });
+});
+
 describe('evGate — structural refusals', () => {
   it('never fires when the success probability is zero', () => {
     // The single most expensive modelling error available on this problem would be
@@ -92,6 +137,7 @@ describe('evGate — structural refusals', () => {
         const verdict = evGate({
           amount,
           marginBps,
+          valueCycles: 1,
           pBps: bps(0),
           gatewayFee: fee,
           messageCost: ZERO,
@@ -111,6 +157,7 @@ describe('evGate — structural refusals', () => {
     const verdict = evGate({
       amount: paiseFromRupeeString('5000.00'),
       marginBps: bps(1800),
+      valueCycles: 1,
       pBps: bps(0),
       gatewayFee: ZERO,
       messageCost: ZERO,
@@ -127,6 +174,7 @@ describe('evGate — structural refusals', () => {
     const base = {
       amount: paiseFromRupeeString('5000.00'),
       marginBps: bps(1800),
+      valueCycles: 1,
       gatewayFee: paiseFromRupeeString('3.50'),
       messageCost: ZERO,
       llmCost: ZERO,
@@ -190,6 +238,7 @@ describe('evGate — contribution margin, not gross amount', () => {
     const input: EvInput = {
       amount: paiseFromRupeeString('400000.00'),
       marginBps: bps(50),
+      valueCycles: 1,
       pBps: bps(400),
       gatewayFee: paiseFromRupeeString('3.50'),
       messageCost: paiseFromRupeeString('0.18'),
@@ -210,6 +259,7 @@ describe('evGate — contribution margin, not gross amount', () => {
     const verdict = evGate({
       amount: paiseFromRupeeString('499.00'),
       marginBps: bps(2600),
+      valueCycles: 1,
       pBps: bps(4500),
       gatewayFee: paiseFromRupeeString('0.80'),
       messageCost: ZERO,

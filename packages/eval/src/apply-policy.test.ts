@@ -60,12 +60,43 @@ describe('applyChanges', () => {
 
   it('throws rather than silently doing nothing when the target is absent', () => {
     // The failure this module exists to prevent, on a real case rather than a synthetic
-    // one: terminal codes have an empty schedule and therefore no `min_gap_hours` line at
-    // all. Asking to change one must fail loudly, not return the text untouched and let a
-    // held-out comparison report a confident zero.
+    // one: `suspected_fraud_block` has an empty schedule and therefore no `min_gap_hours`
+    // line at all. Asking to change one must fail loudly, not return the text untouched and
+    // let a held-out comparison report a confident zero.
+    expect(() =>
+      applyChanges(policy, [change({ reason_code: 'suspected_fraud_block', to_value: 72 })]),
+    ).toThrow(/no matching line/);
+  });
+
+  it('never reaches into a class override to satisfy a change to the base entry', () => {
+    // THE REGRESSION THAT MOTIVATED REWRITING THIS MODULE LINE-BY-LINE.
+    //
+    // `card_expired` has no `min_gap_hours` in its base block, and it has one in the
+    // `subscription_failure` override. The previous regex was scoped to the code's block only
+    // by the lazy quantifier stopping at the first match, so it ran past the end of the block
+    // and silently rewrote the override — no error, wrong setting changed, and a held-out
+    // comparison measuring the effect of a change nobody proposed.
     expect(() =>
       applyChanges(policy, [change({ reason_code: 'card_expired', to_value: 72 })]),
     ).toThrow(/no matching line/);
+
+    // And the override is untouched, which is the half a passing throw does not prove.
+    expect(policy.yaml).toContain('min_gap_hours: 24');
+    expect(policy.forReason('card_expired', 'subscription_failure').min_gap_hours).toBe(24);
+  });
+
+  it('edits the named code and leaves every other block alone', () => {
+    // The positive half: scoping correctly is only useful if the intended edit still lands.
+    const applied = buildPolicy(
+      applyChanges(policy, [change({ reason_code: 'insufficient_funds', to_value: 72 })]),
+    );
+
+    expect(applied.forReason('insufficient_funds').min_gap_hours).toBe(72);
+    // `no_response` also carries a min_gap_hours, further down the same file.
+    expect(applied.forReason('no_response').min_gap_hours).toBe(
+      policy.forReason('no_response').min_gap_hours,
+    );
+    expect(applied.forReason('card_expired', 'subscription_failure').min_gap_hours).toBe(24);
   });
 
   it('warns nobody when a change is legal but inert — which is the harder problem', () => {

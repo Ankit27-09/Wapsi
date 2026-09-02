@@ -11,6 +11,8 @@ import type { Arm as ArmId, Db } from '@rc/db';
 import {
   executeDecision,
   loadAttemptHistory,
+  loadOpenPromise,
+  loadTemplate,
   loadPlanContext,
   type ExecuteDeps,
 } from '@rc/engine';
@@ -223,6 +225,8 @@ export async function runArm(options: RunOptions): Promise<RunResult> {
     .select([
       'txn.id as id',
       'txn.failed_at as failed_at',
+      'txn.risk_class as risk_class',
+      'txn.logical_ref as logical_ref',
       'failure_event.raw as raw',
       'failure_event.gateway_code as gateway_code',
       'failure_event.gateway_description as gateway_description',
@@ -231,6 +235,26 @@ export async function runArm(options: RunOptions): Promise<RunResult> {
     .orderBy('txn.failed_at', 'asc')
     .orderBy('txn.id', 'asc')
     .execute();
+
+  // Re-sorted here, tie-breaking on the GENERATION INDEX rather than on the primary key.
+  //
+  // `logical_ref` is the transaction's position in the seeded population, so this is an
+  // order the in-memory sweep can reproduce exactly. Tying on `txn.id` is deterministic but
+  // unreproducible — the id is a hash, so its ordering is unrelated to anything the sweep
+  // knows. That did not matter while every transaction was independent, and it started
+  // mattering the moment contact ceilings coupled the transactions belonging to one
+  // customer: processing order then decides which sends are permitted, and the two paths
+  // disagreed by one attempt in two hundred.
+  //
+  // Sorted in TypeScript rather than by adding `(logical_ref)::integer` to the query, because
+  // nothing outside `@rc/db` constructs SQL — a raw fragment here would need `kysely` as a
+  // direct dependency of this package and put query-building where the boundary says it
+  // does not go. The `ORDER BY` above still makes the fetch itself deterministic.
+  txns.sort(
+    (left, right) =>
+      left.failed_at.getTime() - right.failed_at.getTime() ||
+      Number.parseInt(left.logical_ref, 10) - Number.parseInt(right.logical_ref, 10),
+  );
 
   await ensureReasonCodesSeeded(db);
 
@@ -299,14 +323,32 @@ export async function runArm(options: RunOptions): Promise<RunResult> {
       // Attempt numbering does not depend on the clock, so it can be read first and used to
       // resolve the landing; everything clock-sensitive is then read at the landing itself.
       const history = await loadAttemptHistory(db, txnId);
+      const promise = await loadOpenPromise(db, txnId);
+      const attemptNo = history.firedCount + 1;
+
+      // The step's channel is resolved BEFORE the landing time, because it changes the
+      // landing time: a voice step has to be pulled into the narrow window in which calling
+      // is permitted, and a message step pushed out of quiet hours. The English variant is
+      // queried because the channel is a property of the template family rather than of the
+      // language — a Hinglish SMS is still an SMS.
+      const scheduledStep = policy.scheduleEntry(reasonCode, attemptNo, row.risk_class);
+      const stepTemplateId =
+        scheduledStep?.template ?? policy.forReason(reasonCode, row.risk_class).template;
+      const stepChannel =
+        stepTemplateId === undefined
+          ? undefined
+          : ((await loadTemplate(db, stepTemplateId))?.channel ?? undefined);
 
       const landsAt = attemptLandsAt({
         policy,
         reasonCode,
-        attemptNo: history.firedCount + 1,
+        riskClass: row.risk_class,
+        attemptNo,
         failedAt: row.failed_at,
         previousLanding,
         fallback: clock,
+        promiseDueAt: promise?.promisedFor ?? null,
+        ...(stepChannel === undefined ? {} : { channel: stepChannel }),
       });
       clock = landsAt;
 
@@ -325,14 +367,21 @@ export async function runArm(options: RunOptions): Promise<RunResult> {
           policy,
           priors,
           reasonCode,
+          riskClass: context.txn.riskClass,
           amount: context.txn.amount,
           marginBps: context.txn.marginBps,
+          lifetimeCycles: context.txn.lifetimeCycles,
           currentRail: context.txn.rail,
           attemptNo: context.attemptNo,
           hoursSinceLastAttempt: gapSinceLastAttempt(previousLanding, landsAt),
           contactsThisWeek: context.contactsThisWeek,
+          callsThisWeek: context.callsThisWeek,
           consent: context.consent,
           template: context.template,
+          onNcprRegistry: context.onNcprRegistry,
+          mandateBacked: context.txn.mandateBacked,
+          hoursSincePreDebitNotice: context.hoursSincePreDebitNotice,
+          openPromiseDueAt: context.openPromiseDueAt,
           batchFeeRemaining: context.batchFeeRemaining,
         },
         {

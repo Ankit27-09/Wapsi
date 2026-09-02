@@ -7,7 +7,9 @@ import {
   idempotencyKey as brandKey,
   txnId as brandTxnId,
   formatINR,
+  incursGatewayFee,
   toRupeeString,
+  type Channel,
   type Gateway,
   type GatewayOutcome,
   type IdempotencyKey,
@@ -15,7 +17,14 @@ import {
   type TraceId,
   type TxnId,
 } from '@rc/core';
-import { lockBatchBudget, withTx, type Db, type DbOrTx } from '@rc/db';
+import {
+  lockBatchBudget,
+  withTx,
+  type Db,
+  type DbOrTx,
+  type PlannedAction,
+  type Verdict,
+} from '@rc/db';
 import type { Policy } from '@rc/policy';
 import { deriveIdempotencyKey } from './idempotency.js';
 import type { Plan } from './plan.js';
@@ -124,6 +133,9 @@ export async function executeDecision(
         verdict: 'refuse_bounds',
         action: 'none',
         refuseDetail: detail,
+        // The downgrade path: the plan passed the gate and lost a race for the budget between
+        // planning and execution. Named as the budget bound, because that is what stopped it.
+        refuseRule: 'batch_fee_budget',
         attemptNo: null,
         key: null,
         state: 'planned',
@@ -151,6 +163,7 @@ export async function executeDecision(
       verdict: 'fire',
       action: plan.action,
       refuseDetail: null,
+      refuseRule: null,
       attemptNo: args.attemptNo,
       key,
       state: 'pending',
@@ -206,6 +219,11 @@ export async function executeDecision(
       reason_code: args.reasonCode,
       attempt_no: String(args.attemptNo),
       timing: plan.timing,
+      // What the action IS, not just when it lands. The simulator needs it for two
+      // independent reasons: only a charging action incurs a fee, and "will a retry
+      // authorise" and "will this customer tap a link" are different questions with
+      // different answers at the same timing.
+      action: plan.action,
     },
   });
 
@@ -255,6 +273,7 @@ export async function reconcileStranded(
       'decision.trace_id',
       'decision.idempotency_key',
       'decision.planned_rail',
+      'decision.planned_action',
       'decision.reason_code',
       'decision.attempt_no',
       'decision.planned_timing',
@@ -263,6 +282,14 @@ export async function reconcileStranded(
       'txn.customer_id',
       'txn.batch_id',
       'txn.logical_ref',
+      // The rail the original payment used. Needed because `planned_rail` is deliberately
+      // null for an action that presents no charge, and the gateway request still needs a
+      // rail field — one whose fee it will not charge.
+      'txn.rail as txn_rail',
+      'txn.risk_class',
+      'txn.lifetime_cycles',
+      'txn.days_overdue',
+      'txn.mandate_ref',
     ])
     .where('decision.batch_id', '=', args.batchId)
     .where('decision.state', '=', 'pending')
@@ -274,19 +301,29 @@ export async function reconcileStranded(
     .execute();
 
   for (const row of stranded) {
-    if (
-      row.idempotency_key === null ||
-      row.planned_rail === null ||
-      row.planned_timing === null
-    ) {
+    if (row.idempotency_key === null || row.planned_timing === null) {
       // The `decision_fire_is_identified` and `decision_fire_has_timing` constraints make
       // this unreachable. Asserting it anyway means a future migration that relaxed either
       // constraint would surface here rather than as a silently mispriced reconciliation.
       throw new Error(
         `decision ${row.decision_id} is pending but incompletely identified ` +
-          `(key/rail/timing); a CHECK constraint should have made this impossible`,
+          `(key/timing); a CHECK constraint should have made this impossible`,
       );
     }
+
+    // `planned_rail` is null exactly when the action presents no charge, which the
+    // `decision_rail_only_when_charging` constraint guarantees. Both halves are asserted so
+    // a relaxed constraint surfaces here rather than as a reconciliation that re-dispatches
+    // a payment link as a card charge.
+    const charging = incursGatewayFee(row.planned_action);
+    if (charging !== (row.planned_rail !== null)) {
+      throw new Error(
+        `decision ${row.decision_id} records action ${row.planned_action} with ` +
+          `planned_rail ${String(row.planned_rail)}; a charge must name a rail and a ` +
+          'non-charging action must not.',
+      );
+    }
+    const rail = row.planned_rail ?? row.txn_rail;
 
     const key = brandKey(row.idempotency_key);
 
@@ -300,8 +337,12 @@ export async function reconcileStranded(
       customerId: brandCustomerId(row.customer_id),
       amount: PaiseSchema.parse(row.amount_paise),
       marginBps: bps(row.margin_bps),
-      rail: row.planned_rail,
+      rail,
       logicalRef: row.logical_ref,
+      riskClass: row.risk_class,
+      lifetimeCycles: row.lifetime_cycles,
+      daysOverdue: row.days_overdue,
+      mandateBacked: row.mandate_ref !== null && row.risk_class !== 'mandate_lapsed',
     };
 
     // The question the whole design turns on: did the previous dispatch reach the gateway?
@@ -313,7 +354,7 @@ export async function reconcileStranded(
       outcome = await deps.gateway.attempt({
         idempotencyKey: key,
         amount: txn.amount,
-        rail: row.planned_rail,
+        rail,
         context: {
           txn_id: row.txn_id,
           logical_ref: row.logical_ref,
@@ -321,6 +362,7 @@ export async function reconcileStranded(
           reason_code: row.reason_code,
           attempt_no: String(row.attempt_no ?? 1),
           timing: row.planned_timing,
+          action: row.planned_action,
         },
       });
       redispatched += 1;
@@ -364,7 +406,7 @@ async function settle(
     readonly at: Date;
     readonly outcome: GatewayOutcome;
     readonly policyVersion: number;
-    readonly contact: { readonly channel: 'sms' | 'whatsapp' | 'email'; readonly templateId: string } | null;
+    readonly contact: { readonly channel: Channel; readonly templateId: string } | null;
     readonly messageCost: Paise;
     readonly reconciled?: boolean;
   },
@@ -438,7 +480,7 @@ async function sendMessage(
   args: {
     readonly decisionId: string;
     readonly customerId: string;
-    readonly contact: { readonly channel: 'sms' | 'whatsapp' | 'email'; readonly templateId: string };
+    readonly contact: { readonly channel: Channel; readonly templateId: string };
     readonly cost: Paise;
     readonly at: Date;
   },
@@ -476,6 +518,7 @@ async function recordRefusal(
       verdict: plan.verdict,
       action: plan.action,
       refuseDetail: plan.detail,
+      refuseRule: plan.rule,
       attemptNo: null,
       key: null,
       state: 'planned',
@@ -532,9 +575,11 @@ async function insertDecision(
      * reconstructable rather than merely logged.
      */
     readonly policyVersion: number;
-    readonly verdict: 'fire' | 'refuse_ev' | 'refuse_bounds' | 'refuse_terminal' | 'refuse_kill_switch';
-    readonly action: 'retry' | 'switch_rail' | 'notify' | 'escalate' | 'none';
+    readonly verdict: Verdict;
+    readonly action: PlannedAction;
     readonly refuseDetail: string | null;
+    /** Null exactly when the verdict is `fire`, enforced by a CHECK constraint. */
+    readonly refuseRule: string | null;
     readonly attemptNo: number | null;
     readonly key: IdempotencyKey | null;
     readonly state: 'planned' | 'pending';
@@ -554,6 +599,7 @@ async function insertDecision(
       evaluated_at: args.at,
       verdict: spec.verdict,
       refuse_detail: spec.refuseDetail,
+      refuse_rule: spec.refuseRule,
       planned_action: spec.action,
       // Derived from the VERDICT being recorded, not from the plan that was proposed.
       //
@@ -562,7 +608,15 @@ async function insertDecision(
       // the plan meant writing a refusal that claimed to have chosen when to act. The
       // `decision_fire_has_timing` constraint rejected it — correctly, and only once an arm
       // aggressive enough to exhaust the budget existed to trigger it.
-      planned_rail: spec.verdict === 'fire' && args.plan.kind === 'fire' ? args.plan.rail : null,
+      //
+      // Also gated on the action PRESENTING A CHARGE. A payment link has no rail until the
+      // customer picks one, and a pre-debit notice never has one at all — recording the rail
+      // the original payment failed on would assert a fact about an action that never
+      // touched a rail. The `decision_rail_only_when_charging` constraint enforces it.
+      planned_rail:
+        spec.verdict === 'fire' && args.plan.kind === 'fire' && incursGatewayFee(args.plan.action)
+          ? args.plan.rail
+          : null,
       planned_timing:
         spec.verdict === 'fire' && args.plan.kind === 'fire' ? args.plan.timing : null,
       ev_p_bps: ev.pBps,

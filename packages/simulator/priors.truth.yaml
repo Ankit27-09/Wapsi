@@ -62,10 +62,21 @@ issuers:
     multiplier_bps: 7200
     note: "Small co-operative bank: flaky infrastructure, long outage tails."
 
+# `scope: charging` means no re-presentment can succeed, leaving room for a
+# non-charging action that genuinely can. `all` means nothing works at all.
 structural_zeros:
-  - card_expired
-  - mandate_expired
-  - suspected_fraud_block
+  - { reason_code: card_expired, scope: charging }
+  - { reason_code: mandate_expired, scope: charging }
+  - { reason_code: suspected_fraud_block, scope: all }
+  - { reason_code: abandoned_at_cart, scope: charging }
+  - { reason_code: abandoned_at_address, scope: charging }
+  - { reason_code: abandoned_at_payment, scope: charging }
+  - { reason_code: abandoned_at_otp, scope: charging }
+  - { reason_code: awaiting_approval, scope: charging }
+  - { reason_code: disputed_line_item, scope: charging }
+  - { reason_code: payment_run_cycle, scope: charging }
+  - { reason_code: no_response, scope: charging }
+  - { reason_code: promised_not_paid, scope: charging }
 
 truth:
   # --- insufficient funds ---------------------------------------------------
@@ -184,3 +195,187 @@ truth:
     attempt: 2
     timing: short_backoff
     p_bps: 2600
+
+  # ==========================================================================
+  # CHARGES ON A MANDATE RAIL
+  #
+  # Later attempts at longer timings, because a debit cannot precede its notice.
+  # Published is optimistic about the 72-hour outage recovery (8600 vs 8100) and
+  # pessimistic about the late window, in both cases by the same kind of margin
+  # as everywhere else in this file.
+  # ==========================================================================
+  - reason_code: insufficient_funds
+    attempt: 3
+    timing: late_window
+    p_bps: 1900
+  - reason_code: issuer_down
+    attempt: 2
+    timing: salary_window
+    p_bps: 8100
+  - reason_code: issuer_down
+    attempt: 3
+    timing: late_window
+    p_bps: 2900
+  - reason_code: do_not_honour
+    attempt: 2
+    timing: salary_window
+    p_bps: 1200
+  - reason_code: network_timeout
+    attempt: 2
+    timing: salary_window
+    p_bps: 5600
+
+  # ==========================================================================
+  # NON-CHARGING INTERVENTIONS
+  #
+  # Where the world differs from the policy most, and in the most instructive
+  # direction. Two systematic errors, both deliberate:
+  #
+  #   1. THE POLICY IS OPTIMISTIC ABOUT LINKS. Every checkout figure below is
+  #      lower than published — a link is easier to send than to act on. If the
+  #      controller still pays for itself here, that is a real result rather
+  #      than an artefact of a generous prior.
+  #
+  #   2. THE POLICY IS PESSIMISTIC ABOUT THE PAYMENT-RUN REMINDER. Truth is
+  #      6100 against a published 5500. A well-timed B2B reminder is the single
+  #      most under-priced action in the published table, so the controller
+  #      leaves money on the floor here — which is what the ablation is for.
+  #
+  # The issuer multiplier is NOT applied to any of these. A co-operative bank's
+  # flaky authorisation infrastructure is a real reason a debit fails; it has
+  # nothing to do with whether a customer taps a link.
+  # ==========================================================================
+
+  # --- pre-debit notification ----------------------------------------------
+  - reason_code: insufficient_funds
+    attempt: 1
+    timing: pre_debit_window
+    kind: pre_debit_notify
+    p_bps: 1800
+  - reason_code: issuer_down
+    attempt: 1
+    timing: pre_debit_window
+    kind: pre_debit_notify
+    p_bps: 300
+  - reason_code: do_not_honour
+    attempt: 1
+    timing: pre_debit_window
+    kind: pre_debit_notify
+    p_bps: 1500
+  - reason_code: network_timeout
+    attempt: 1
+    timing: pre_debit_window
+    kind: pre_debit_notify
+    p_bps: 200
+
+  # --- re-authorisation ----------------------------------------------------
+  # Published says 2400 then 1100 for a lapsed mandate. Truth is 2000 then 1300:
+  # the first ask is harder than the policy thinks and the follow-up is more
+  # useful, so a policy that stopped after one attempt would be wrong twice.
+  - reason_code: mandate_expired
+    attempt: 1
+    timing: next_day
+    kind: remandate
+    p_bps: 2000
+  - reason_code: mandate_expired
+    attempt: 2
+    timing: salary_window
+    kind: remandate
+    p_bps: 1300
+  - reason_code: card_expired
+    attempt: 1
+    timing: next_day
+    kind: remandate
+    p_bps: 2300
+  - reason_code: card_expired
+    attempt: 2
+    timing: salary_window
+    kind: remandate
+    p_bps: 800
+  - reason_code: do_not_honour
+    attempt: 3
+    timing: late_window
+    kind: remandate
+    p_bps: 700
+
+  # --- checkout recovery links ---------------------------------------------
+  # The stage-by-stage ordering is real and the policy has it right; the LEVELS
+  # are all lower than published. Getting the ordering right is what earns the
+  # four separate causes, and it survives here.
+  - reason_code: abandoned_at_otp
+    attempt: 1
+    timing: immediate
+    kind: payment_link
+    p_bps: 3300
+  - reason_code: abandoned_at_otp
+    attempt: 2
+    timing: short_backoff
+    kind: payment_link
+    p_bps: 1200
+  - reason_code: abandoned_at_otp
+    attempt: 3
+    timing: next_day
+    kind: payment_link
+    p_bps: 500
+  - reason_code: abandoned_at_payment
+    attempt: 1
+    timing: short_backoff
+    kind: payment_link
+    p_bps: 1700
+  - reason_code: abandoned_at_payment
+    attempt: 2
+    timing: next_day
+    kind: payment_link
+    p_bps: 700
+  - reason_code: abandoned_at_address
+    attempt: 1
+    timing: medium_backoff
+    kind: payment_link
+    p_bps: 1000
+  - reason_code: abandoned_at_address
+    attempt: 2
+    timing: next_day
+    kind: payment_link
+    p_bps: 400
+  - reason_code: abandoned_at_cart
+    attempt: 1
+    timing: next_day
+    kind: payment_link
+    p_bps: 500
+
+  # --- receivables ---------------------------------------------------------
+  - reason_code: payment_run_cycle
+    attempt: 1
+    timing: payment_run_window
+    kind: notify
+    p_bps: 6100
+  - reason_code: awaiting_approval
+    attempt: 1
+    timing: next_day
+    kind: notify
+    p_bps: 2200
+  - reason_code: awaiting_approval
+    attempt: 2
+    timing: payment_run_window
+    kind: notify
+    p_bps: 3400
+  - reason_code: no_response
+    attempt: 1
+    timing: next_day
+    kind: notify
+    p_bps: 1100
+  - reason_code: no_response
+    attempt: 2
+    timing: payment_run_window
+    kind: notify
+    p_bps: 900
+  - reason_code: no_response
+    attempt: 3
+    timing: payment_run_window
+    kind: notify
+    p_bps: 2600
+  - reason_code: promised_not_paid
+    attempt: 1
+    timing: promise_followup
+    kind: notify
+    p_bps: 2700

@@ -1,34 +1,91 @@
 # Recovery Controller
 
-**Expected-value gated payment recovery with a bounded, self-improving policy.**
+**Expected-value gated revenue recovery with a bounded, self-improving policy.**
 Razorpay AI Buildathon 2026 · Track 03 — AI Revenue Recovery
+
+One decision engine across five kinds of revenue at risk: failed payments, failed
+subscription cycles, lapsed mandates, abandoned checkouts and overdue B2B invoices. It decides
+what to try, when, on which rail or channel — and, most of the time, **decides not to act at
+all**, because most recovery attempts destroy value and the system can prove which ones.
 
 ---
 
 ## Results
 
-<!-- RESULTS_TABLE:START — from `pnpm demo`, seed 42, policy v1 (63d97a638935) -->
+<!-- Regenerate with `pnpm demo`. Seed 42, policy v1. -->
 
-300 transactions · 236 recoverable · every arm on an identical seeded population
+300 transactions · 293 recoverable · every arm on an identical seeded population
 
 | Arm | Recovered | Rate | ₹ value recovered | ₹ cost | ₹ **net** | **% of ceiling** |
 |---|---|---|---|---|---|---|
-| **B0** · do nothing | 0/236 | 0.0% | ₹0.00 | ₹0.00 | ₹0.00 | 0.0% |
-| **B1** · retry all, immediately | 31/236 | 13.1% | ₹66,866.82 | ₹681.20 | ₹66,185.62 | 17.5% |
-| **B2** · fixed-schedule dunning | 76/236 | 32.2% | ₹1,80,977.04 | ₹1,199.70 | ₹1,79,777.34 | 47.5% |
-| **B3** · oracle (ceiling) | — | — | — | — | ₹3,78,780 | **100.0%** |
-| **RC** · Recovery Controller | **101/236** | **42.8%** | **₹3,48,369.07** | **₹647.98** | **₹3,47,721.09** | **91.8%** |
+| **B0** · do nothing | 0/293 | 0.0% | ₹0.00 | ₹0.00 | ₹0.00 | 0.0% |
+| **B1** · retry all, immediately | 25/293 | 8.5% | ₹54,979.68 | ₹429.00 | ₹54,550.68 | 11.5% |
+| **B2** · fixed-schedule dunning | 50/293 | 17.1% | ₹96,995.05 | ₹1,118.60 | ₹95,876.45 | 20.4% |
+| **B4** · blast reminders at everything | 9/293 | 3.1% | ₹99,401.01 | ₹127.00 | ₹99,274.01 | 20.9% |
+| **B3** · oracle (ceiling) | 117/293 | 39.9% | ₹4,76,316.79 | ₹576.14 | ₹4,75,740.65 | **100.0%** |
+| **RC** · Recovery Controller | **76/293** | **25.9%** | **₹2,97,863.79** | **₹357.82** | **₹2,97,505.97** | **62.5%** |
 
 **Negative expected-value attempts**, priced against the *published* priors — the evidence
 available beforehand, not hindsight:
 
 | Arm | Wasted attempts | ₹ spent on them |
 |---|---|---|
-| B1 | 200 of 300 | ₹461.20 |
-| B2 | **429 of 525** | ₹992.20 |
-| RC | **0 of 322** | ₹0.00 — the gate refuses them by construction |
+| B1 | 97 of 171 | ₹260.00 |
+| B2 | **345 of 435** | ₹923.80 |
+| B4 | **518 of 557** | ₹100.88 |
+| RC | **0 of 290** | ₹0.00 — the gate refuses them by construction |
 
-<!-- RESULTS_TABLE:END -->
+**% of ceiling is value recovered against the oracle's, not net against net.** The oracle
+assumes every customer is reachable, so it sends messages the controller's consent bounds
+suppress — and pays for them. On a class where both recover the same transactions, that extra
+postage made net-against-net exceed 100%, which is impossible for a ceiling and was the
+symptom of a real definitional problem. Cost stays in the table beside it, where a difference
+in spending is visible rather than baked into the headline ratio.
+
+### One engine, five kinds of revenue at risk
+
+A single blended figure cannot tell "works across five domains" from "works on payments and
+loses money on receivables", and the aggregate is exactly where a per-class failure would
+hide. So it is broken out, against the oracle's ceiling **for that class**:
+
+| Risk class | Txns | Fired | Recovered | Refused | ₹ net | ₹ ceiling | % of ceiling |
+|---|---|---|---|---|---|---|---|
+| `payment_failure` | 108 | 137 | 44/104 | 64 | ₹1,98,530 | ₹2,08,808 | **95.2%** |
+| `subscription_failure` | 63 | 69 | 20/63 | 43 | ₹15,555 | ₹23,175 | **67.5%** |
+| `checkout_abandonment` | 62 | 42 | 4/62 | 58 | ₹6,942 | ₹8,705 | **79.8%** |
+| `receivable_overdue` | 44 | 20 | 6/41 | 38 | ₹76,078 | ₹2,34,064 | **32.5%** |
+| `mandate_lapsed` | 23 | 22 | 2/23 | 21 | ₹401 | ₹1,565 | **25.9%** |
+
+Plus **₹1,53,858 of subscription value preserved** beyond the recovered cycle — reported
+separately and never folded into net. Net is margin on money that has moved; that figure is
+margin on cycles a saved subscription will pay *if* it runs its expected term. It is the basis
+the expected-value gate priced on, which is why it is shown at all, but it rests on an
+assumption and the headline should not.
+
+### Why receivables sits at 32.5% — the price of the guardrails
+
+The obvious question about the table above is why the two messaging-only classes trail. The
+answer is a number, not a paragraph:
+
+| Rule | Refusals | ₹ expected recovery forgone | Share |
+|---|---|---|---|
+| `consent` | 86 | ₹1,70,547 | **88.3%** |
+| `contact_ceiling` | 17 | ₹21,707 | 11.2% |
+| `never_contact` | 3 | ₹759 | 0.4% |
+| `ev_floor` | 9 | ₹49 | 0.0% |
+| `min_gap` | 1 | ₹49 | 0.0% |
+| `promise_open` | 1 | ₹17 | 0.0% |
+| `attempt_cap` / `terminal` | 107 | ₹0 | 0.0% |
+
+**₹1,93,127 across 224 refusals, and 88% of it is consent.** Forty percent of the seeded
+customer book has either opted out or never opted in. Checkout abandonment and overdue
+receivables recover money by messaging and nothing else — there is no charge to re-present —
+so a customer who cannot be messaged cannot be recovered, and the oracle is permitted to
+message them while the controller is not.
+
+That is the price of the compliance envelope, not a list of bugs. `attempt_cap` and `terminal`
+forgo exactly ₹0, which is the gate working: those refusals decline actions whose expected
+recovery was already zero. `ev_floor` is the one line here a merchant is actually free to move.
 
 ### B2 is the comparison that matters
 
@@ -38,21 +95,81 @@ Whatever separates them is the value of *knowing why the payment failed*.
 
 | | Attempts fired | Recovered | Per-attempt hit rate | ₹ spent | ₹ net |
 |---|---|---|---|---|---|
-| **B2** | 525 | 63 | 12.0% | ₹1,200.00 | ₹1,15,412.66 |
-| **RC** | **322** | **116** | **36.0%** | **₹623.66** | **₹3,65,501.56** |
+| **B2** | 435 | 50 | 11.5% | ₹1,118.60 | ₹95,876 |
+| **RC** | **290** | **76** | **26.2%** | **₹357.82** | **₹2,97,506** |
 
-**RC recovered 84% more transactions while firing 39% fewer attempts and spending 48%
-less** — 3× the per-attempt hit rate, and 3.2× the net value. That is targeting isolated
+**RC recovered 52% more transactions while firing 33% fewer attempts and spending 68%
+less** — 2.3× the per-attempt hit rate, and 3.1× the net value. That is targeting isolated
 from persistence.
 
-B2 also fired **429 of its 525 attempts at negative expected value**, worse than B1, because
-a fixed cadence re-presents expired cards and revoked mandates with the same enthusiasm as
-a transient timeout. It is not a strawman — it is what dunning tools actually ship.
+B2 also fired **345 of its 435 attempts at negative expected value**, because a fixed cadence
+re-presents expired cards and revoked mandates with the same enthusiasm as a transient
+timeout. It is not a strawman — it is what dunning tools actually ship.
 
-**The residual 11.2% gap to the ceiling is stated, not hidden.** The oracle sees the
-per-issuer effect no real policy can observe and picks optimal timing per attempt, so 65.3%
-recovery is genuinely unreachable. That is what a ceiling is for: it turns "we beat naive
-retry" into "88.8% of what was achievable, and here is the rest."
+### B4 is the comparison for everything that cannot be retried
+
+B1 and B2 are retry baselines, and two of the five risk classes have nothing to retry. Without
+an **untargeted messaging** baseline, the controller's results on checkout abandonment and
+overdue receivables would only be measurable against doing nothing — a much easier bar than
+the one the payment classes are held to, and a gap a careful reader would notice.
+
+B4 does what an off-the-shelf abandoned-cart or dunning tool does: three generic reminders per
+transaction on a fixed cadence, no diagnosis, no expected-value gate, no contact ceiling. It
+respects template registration, because that is a legal constraint rather than a policy
+preference and a baseline that broke it would not correspond to anything anyone could run.
+
+It fired **557 messages to recover 9 transactions** — 518 of those attempts at negative
+expected value. The controller sent fewer messages and recovered eight times as much value,
+which is the difference between knowing that an OTP drop-off is worth chasing within minutes
+and a browsing cart may not be worth chasing at all.
+
+### The gap to the ceiling is stated, not hidden
+
+The oracle reads the per-issuer effect no real policy can observe, evaluates every timing and
+every intervention available, and plays optimally against the true outcome distribution. It is
+a **measurement ceiling, not a strategy** — nothing that reads the outcome before choosing the
+action can ship.
+
+It is also bounded by law rather than by preference, which took three attempts to get right
+(entries 5a–5c in [`FAILURES.md`](FAILURES.md)). It ignores the expected-value floor, the
+attempt cap and the contact ceiling, because those are a merchant's choices. It does **not**
+ignore the pre-debit notification requirement, because that is the condition under which an
+e-mandate debit is lawful at all — an oracle that debits without notice is not a ceiling but a
+fantasy, and reporting the controller as a fraction of one understates it against something
+nobody is permitted to do.
+
+---
+
+## Scope — every direction in the brief
+
+Track 03 lists seven example directions. All seven are built, and this table says where each
+one lives so a reader can check rather than take the claim on trust.
+
+| Brief direction | Mechanism | Where |
+|---|---|---|
+| **Smart retry policy** — root-cause diagnosis, per-cause timing and rail | 18-code taxonomy where a class exists only if it earns a distinct intervention; timing buckets carry the priors; `switch_rail` for authentication failures | [`taxonomy.ts`](packages/core/src/taxonomy.ts), [`policy.default.yaml`](packages/policy/policy.default.yaml) |
+| **Mandate retry sequencer** — sequenced retries in the permitted window, with pre-debit notification | A charge on a mandate rail is **refused** unless a notification was *delivered* ≥24h earlier. Read from `message_send`, not from the decision that planned it — a notice suppressed by quiet hours never reached the customer, so the debit is still unlawful | `pre_debit_notice` bound in [`bounds.ts`](packages/policy/src/bounds.ts) |
+| **Failed-subscription recovery** — value is the relationship, not the cycle | Value term multiplies by `lifetime_cycles`, so the same probability justifies several times the spend. Reported separately from cash, never added to it | `valueCycles` in [`ev.ts`](packages/policy/src/ev.ts) |
+| **Checkout drop-off recovery** — messaging only, no gateway fee | Four separate causes by funnel stage, because their recovery rates differ by more than 5×. Nothing was charged, so no fee applies — the whole cost is 18 paise, which is why a link clears the floor where a ₹3.50 retry cannot | `checkout_abandonment` class, `incursGatewayFee` in [`risk.ts`](packages/core/src/risk.ts) |
+| **B2B receivables chaser** — escalation ladder, payment-run timing, hard stop | Five causes with five strategies. The ladder climbs **channel** rather than volume — two messages, then one call — and stops. A disputed invoice gets a human immediately and no automated contact at all | `receivable_overdue` class |
+| **Promise-to-pay tracker** — a suppression mechanism first | An open promise **blocks** the ladder until its date and records `await_promise` rather than `none`, so the audit trail distinguishes deliberate waiting from an idle invoice. A broken promise changes the action, not just the odds: straight to a call, then a human | `promise` table, `promise_open` bound |
+| **Hinglish voice recovery** — voice as a channel, not a louder SMS | Registered voice scripts (Hinglish variants selected by `preferred_language`), NCPR/DND registry override, a narrower 10:00–19:00 calling window, one call per week, and ~22× the cost of an SMS — so the expected-value gate decides between a message and a call | `voice` channel, [`templates.ts`](packages/simulator/src/templates.ts) |
+
+**What the generalisation actually cost.** Five classes, one engine — not five systems. The
+classes differ in exactly three ways, and all three were already inputs the expected-value gate
+took: which causes are possible, which interventions are legal, and how value and cost are
+computed. So there is one decision path, one audit trail, one set of bounds and one evaluation
+harness. The differences are data:
+
+```
+RISK_CLASS_META[riskClass] → { causes, interventions, recurring }
+```
+
+Two invariants make that safe rather than merely tidy. A policy that schedules an intervention
+a class does not permit **fails to load** — including a base entry inherited by a class that
+would not permit it. And a retry on a lapsed mandate is refused as `illegal_intervention`
+*before* it is priced, because reporting it as `refuse_ev` would suggest a better-priced
+version of the same action might work, which is exactly the wrong conclusion.
 
 ### The bounded improvement loop — `pnpm propose`
 
@@ -404,6 +521,9 @@ Full detail: [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md).
 | 7d · Policy-proposal loop | ✅ **agent proposes, human decides, held-out measures** |
 | 8 · Surface — generated report | ✅ **self-contained, offline, 4 charts** |
 | 8b · Operations console — Next.js, 5 routes | ✅ **Server Components, no API layer** |
+| 9 · **All five risk classes** — one engine, per-class proof | ✅ **found 7 bugs, 5 of which inflated our own numbers** |
+| 9b · B4 messaging baseline + per-class ceiling | ✅ **the classes with no retry now have a real comparator** |
+| 9c · Cost of the guardrails, in rupees | ✅ **88% of the shortfall is consent, and it is stated** |
 
 ---
 
@@ -412,6 +532,15 @@ Full detail: [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md).
 ```bash
 pnpm verify   # typecheck + lint + boundaries + tests
 ```
+
+**100 tests, 9 files.** 20 skip cleanly with an explanation when Docker is not running rather
+than failing with a wall of connection errors.
+
+[`FAILURES.md`](FAILURES.md) records the bugs that mattered — what broke, how it was found, and
+what it cost. Nineteen entries. **Five of them inflated this system's own reported results**,
+and those are listed first, because a bug that flatters the author is the one a reader most
+needs to know was looked for. Three were found by a robustness check rather than by a test,
+which is the argument for having them: the interesting failures here were all silent.
 
 - **The Chinese wall** is enforced in two independent layers, and both were verified by
   deliberately adding a forbidden import and confirming each one fails:
@@ -465,12 +594,25 @@ Stated here rather than discovered in review.
   the widest perturbation band. They are not fitted to any specific issuer.
 - Durability is stateless workers plus Postgres state, not Temporal. That covers most of
   what a real deployment needs and is honestly short of the rest.
-- Messaging is compliant and exercised, but its **effectiveness is not modelled**. 42
-  messages go out per run (24 English, 18 Hinglish) through DLT-registered templates,
-  correctly gated on consent, quiet hours and contact ceilings — and the truth model has no
-  notion of a customer responding to a nudge. So the messages cost money in the reported
-  net value and recover none of it. The compliance layer is real; any claim that the
-  nudges *work* would not be.
+- Messaging effectiveness **is** now modelled, and that is the weakest-sourced part of the
+  system. It had to be: four of the five risk classes recover money by messaging and nothing
+  else, so excluding it would have scored most of the work at zero. Non-charging interventions
+  therefore have their own prior rows — a payment link, a pre-debit notice and a
+  re-authorisation request are three different questions with three different answers, and
+  keying priors on the cause alone had quietly assumed every attempt was a charge.
+
+  What that rests on: **a draw against a table, not a model of a person deciding to buy.**
+  Every one of those rows is `ASSUMED`, gets the wider ±60% band in the sweep, and states its
+  reasoning in [`priors.published.yaml`](packages/policy/priors.published.yaml). The
+  *ordering* is the defensible part — an OTP drop-off recovers far better than an abandoned
+  cart, a well-timed payment-run reminder better than a generic chase — and the sweep's job is
+  to say how wrong the levels can be before the conclusion changes. The truth table
+  deliberately sets every checkout figure *lower* than the published one, so the controller is
+  optimistic about links in the world it is graded against.
+- The **issuer effect is not applied to non-charging actions**, on purpose. A co-operative
+  bank's flaky authorisation infrastructure is a real reason a debit fails; it has nothing to
+  do with whether a customer taps a link. Applying the multiplier there would have been
+  modelling noise dressed as rigour.
 - `dlt_template_id` values are synthetic. Real registration is an operational step with a
   real operator.
 - Single-tenant. Merchant onboarding, key management and per-merchant policy isolation

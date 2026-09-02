@@ -34,9 +34,18 @@ const TRUTH_TIMINGS = [
   'next_day',
   'salary_window',
   'alt_rail',
+  'pre_debit_window',
+  'payment_run_window',
+  'promise_followup',
+  'late_window',
 ] as const;
 
 export type TruthTiming = (typeof TRUTH_TIMINGS)[number];
+
+/** Mirrors `PriorKind` in @rc/policy, duplicated for the same reason as the timings. */
+const TRUTH_KINDS = ['charge', 'payment_link', 'notify', 'pre_debit_notify', 'remandate'] as const;
+
+export type TruthKind = (typeof TRUTH_KINDS)[number];
 
 const IssuerSchema = z.object({
   id: z.string().min(1),
@@ -49,13 +58,19 @@ const TruthRowSchema = z.object({
   reason_code: ReasonCodeSchema,
   attempt: z.number().int().min(1).max(5),
   timing: z.enum(TRUTH_TIMINGS),
+  kind: z.enum(TRUTH_KINDS).default('charge'),
   p_bps: z.number().int().min(0).max(BPS_ONE),
+});
+
+const TruthZeroSchema = z.object({
+  reason_code: ReasonCodeSchema,
+  scope: z.enum(['charging', 'all']),
 });
 
 const TruthFileSchema = z.object({
   version: z.number().int().min(1),
   issuers: z.array(IssuerSchema).min(1),
-  structural_zeros: z.array(ReasonCodeSchema),
+  structural_zeros: z.array(TruthZeroSchema),
   truth: z.array(TruthRowSchema).min(1),
 });
 
@@ -79,6 +94,7 @@ export interface TruthModel {
     attempt: number,
     timing: TruthTiming,
     issuerId: string,
+    kind?: TruthKind,
   ): Bps;
 
   /** Roll against `successProbability`. The only source of outcome randomness. */
@@ -88,6 +104,7 @@ export interface TruthModel {
     attempt: number,
     timing: TruthTiming,
     issuerId: string,
+    kind?: TruthKind,
   ): boolean;
 
   issuerById(id: string): Issuer;
@@ -96,24 +113,28 @@ export interface TruthModel {
   pickIssuer(rng: Rng): Issuer;
 }
 
-const key = (code: ReasonCode, attempt: number, timing: TruthTiming): string =>
-  `${code}|${attempt}|${timing}`;
+const key = (code: ReasonCode, attempt: number, timing: TruthTiming, kind: TruthKind): string =>
+  `${code}|${attempt}|${timing}|${kind}`;
 
 export function buildTruthModel(raw: unknown): TruthModel {
   const parsed = TruthFileSchema.parse(raw);
 
   const byKey = new Map<string, number>();
   for (const row of parsed.truth) {
-    const k = key(row.reason_code, row.attempt, row.timing);
+    const k = key(row.reason_code, row.attempt, row.timing, row.kind);
     if (byKey.has(k)) throw new Error(`Duplicate truth row for ${k} in priors.truth.yaml`);
     byKey.set(k, row.p_bps);
   }
 
-  const zeros = new Set<ReasonCode>(parsed.structural_zeros);
+  const zeros = new Map<ReasonCode, 'charging' | 'all'>(
+    parsed.structural_zeros.map((entry) => [entry.reason_code, entry.scope]),
+  );
   for (const row of parsed.truth) {
-    if (zeros.has(row.reason_code)) {
+    const scope = zeros.get(row.reason_code);
+    if (scope === 'all' || (scope === 'charging' && row.kind === 'charge')) {
       throw new Error(
-        `${row.reason_code} is a structural zero but has a truth row; one of the two is wrong`,
+        `${row.reason_code} is a structural zero (scope: ${scope}) but has a ${row.kind} truth ` +
+          'row; one of the two is wrong',
       );
     }
   }
@@ -132,11 +153,20 @@ export function buildTruthModel(raw: unknown): TruthModel {
     attempt: number,
     timing: TruthTiming,
     issuerId: string,
+    kind: TruthKind = 'charge',
   ): Bps => {
-    if (zeros.has(code) || code === 'unknown') return bps(0);
+    const scope = zeros.get(code);
+    if (scope === 'all' || (scope === 'charging' && kind === 'charge')) return bps(0);
+    if (code === 'unknown') return bps(0);
 
-    const base = byKey.get(key(code, attempt, timing));
+    const base = byKey.get(key(code, attempt, timing, kind));
     if (base === undefined) return bps(0);
+
+    // The issuer effect applies ONLY to an action that presents a charge. A co-operative
+    // bank's flaky authorisation infrastructure is a real reason a retry fails; it has
+    // nothing to do with whether a customer taps a payment link or re-authorises a
+    // mandate. Applying the multiplier there would be modelling noise dressed as rigour.
+    if (kind !== 'charge') return bps(Math.min(BPS_ONE, Math.max(0, base)));
 
     // Integer throughout, and clamped: a multiplier above 10_000 must not be able to
     // push a probability past certainty.
@@ -148,8 +178,8 @@ export function buildTruthModel(raw: unknown): TruthModel {
     version: parsed.version,
     issuers: parsed.issuers,
     successProbability,
-    attemptSucceeds: (rng, code, attempt, timing, issuerId) =>
-      rng.chance(successProbability(code, attempt, timing, issuerId)),
+    attemptSucceeds: (rng, code, attempt, timing, issuerId, kind) =>
+      rng.chance(successProbability(code, attempt, timing, issuerId, kind)),
     issuerById,
     pickIssuer: (rng) => rng.weighted(weightedIssuers),
   };

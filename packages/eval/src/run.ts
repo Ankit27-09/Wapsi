@@ -1,4 +1,4 @@
-import { formatINR, isNegative, toRupeeString } from '@rc/core';
+import { ZERO, add, formatINR, isNegative, toRupeeString } from '@rc/core';
 import { createDb } from '@rc/db';
 import { loadPolicy, loadPriorTable } from '@rc/policy';
 import { ARMS } from './arms.js';
@@ -109,12 +109,36 @@ async function main(): Promise<void> {
           formatINR(m.valueRecovered),
           formatINR(m.cost),
           formatINR(m.net),
-          ceiling === undefined ? '—' : percentOfPaise(m.net, ceiling.net),
+          ceiling === undefined
+            ? '—'
+            : percentOfPaise(m.valueRecovered, ceiling.valueRecovered),
         ]),
       ),
     );
-    process.stdout.write('\n\n');
+    process.stdout.write('\n');
 
+    // WHY THE CEILING IS MEASURED ON VALUE RECOVERED RATHER THAN ON NET.
+    //
+    // It was on net, and net turned out to be the wrong denominator: two classes reported
+    // slightly OVER 100% of it, which is impossible for a ceiling and was the symptom of a
+    // real definitional problem. The oracle assumes every customer is reachable, so it sends
+    // messages the controller's consent and quiet-hours bounds suppress — and pays for them.
+    // On a class where both recover the same transactions, the oracle's extra postage made
+    // its net LOWER than the controller's.
+    //
+    // Value recovered has no such contamination. The oracle fires on any positive expected
+    // value against the true distribution, so no strategy can recover more; the comparison
+    // is then strictly about how much of the recoverable money each arm found. Cost stays in
+    // the table beside it, where the difference in spending is visible rather than baked
+    // into the headline ratio.
+    process.stdout.write(
+      '  % of ceiling is value recovered against the oracle\'s, not net against net:\n' +
+        '  the oracle assumes every customer is reachable and pays for messages the\n' +
+        '  controller\'s consent bounds suppress, which made net-against-net exceed 100%.\n\n',
+    );
+
+    reportByRiskClass(results);
+    reportGuardrailCost(results);
     reportWaste(results);
     reportRefusals(results);
 
@@ -126,6 +150,111 @@ async function main(): Promise<void> {
   } finally {
     await close();
   }
+}
+
+/**
+ * The controller's results per risk class, against the ceiling for that class.
+ *
+ * THE MOST IMPORTANT TABLE IN THE OUTPUT IF THE CLAIM IS THAT ONE ENGINE GENERALISES.
+ *
+ * A single blended net figure cannot tell "works across five domains" apart from "works
+ * brilliantly on payments and loses money on receivables", and the aggregate is precisely
+ * where a per-class failure hides. Reported against the oracle's per-class ceiling rather
+ * than against the baselines, because two of the five classes have no retry baseline at all —
+ * there is nothing to retry — so the ceiling is the only comparator that exists everywhere.
+ */
+function reportByRiskClass(results: readonly ArmMetrics[]): void {
+  const controller = results.find((m) => m.arm === 'rc');
+  const ceiling = results.find((m) => m.arm === 'b3_oracle');
+  if (controller === undefined || ceiling === undefined) return;
+
+  process.stdout.write('  Recovery Controller by risk class, against the per-class ceiling\n\n');
+
+  const rows = controller.byRiskClass
+    .filter((slice) => slice.transactions > 0)
+    .map((slice) => {
+      const ceilingSlice = ceiling.byRiskClass.find((c) => c.riskClass === slice.riskClass);
+      return [
+        slice.riskClass,
+        String(slice.transactions),
+        `${slice.recovered}/${slice.recoverable}`,
+        String(slice.attemptsFired),
+        String(slice.refused),
+        formatINR(slice.net),
+        ceilingSlice === undefined ? '—' : formatINR(ceilingSlice.valueRecovered),
+        ceilingSlice === undefined
+          ? '—'
+          : percentOfPaise(slice.valueRecovered, ceilingSlice.valueRecovered),
+      ];
+    });
+
+  process.stdout.write(
+    table(
+      ['risk class', 'txns', 'recovered', 'fired', 'refused', 'NET', 'ceiling', '% of ceiling'],
+      rows,
+    ),
+  );
+  process.stdout.write('\n\n');
+
+  if (controller.lifetimeValuePreserved > 0n) {
+    process.stdout.write(
+      `  Subscription value preserved beyond the recovered cycle: ` +
+        `${formatINR(controller.lifetimeValuePreserved)}\n` +
+        `  Deliberately excluded from NET above. NET is margin on money that has moved;\n` +
+        `  this is margin on cycles a saved subscription will pay if it runs its expected\n` +
+        `  term. It is the basis the gate priced on, which is why it is shown at all — but\n` +
+        `  it rests on an assumption, and the headline should not.\n\n`,
+    );
+  }
+}
+
+/**
+ * What the guardrails cost, in expected recovery given up.
+ *
+ * THE HONEST ANSWER TO THE SHORTFALL AGAINST THE CEILING, and the table a reader should
+ * check before concluding the strategy is weak. The oracle assumes every customer is
+ * reachable. The controller asks for consent, keeps quiet hours, stops at a weekly ceiling,
+ * refuses a debit with no pre-debit notice on record, and waits when a buyer has promised a
+ * date. Every one of those costs money and every one is correct.
+ *
+ * Valued at `value x p` — what each refused action was expected to recover — rather than at
+ * the amount at risk, which would count the same rupees once per refused attempt on a
+ * transaction and produce a number larger than the batch.
+ *
+ * Presented as a cost to be aware of rather than a target: `consent` at the top of this list
+ * is not a bug to be fixed, it is the price of not messaging people who asked not to be
+ * messaged. The one line worth acting on is `ev_floor`, which is a genuine risk preference and
+ * the only figure here a merchant is free to change.
+ */
+function reportGuardrailCost(results: readonly ArmMetrics[]): void {
+  const controller = results.find((m) => m.arm === 'rc');
+  if (controller === undefined || controller.forgoneByRule.length === 0) return;
+
+  const total = controller.forgoneByRule.reduce((sum, row) => add(sum, row.forgone), ZERO);
+
+  process.stdout.write('  What the guardrails cost the controller, in expected recovery\n\n');
+  process.stdout.write(
+    table(
+      ['rule', 'refusals', 'expected recovery forgone', 'share'],
+      controller.forgoneByRule.map((row) => [
+        row.rule,
+        String(row.count),
+        formatINR(row.forgone),
+        percentOfPaise(row.forgone, total),
+      ]),
+    ),
+  );
+
+  const refusals = controller.forgoneByRule.reduce((n, row) => n + row.count, 0);
+
+  process.stdout.write(
+    `\n  Total ${formatINR(total)} across ${refusals} refusals.\n\n` +
+      `  This is the price of the compliance envelope, not a list of bugs. Every rule above\n` +
+      `  except ev_floor is a legal or contractual constraint, and the shortfall against the\n` +
+      `  oracle's ceiling is mostly this table rather than a weaker strategy — the oracle is\n` +
+      `  permitted to message customers who never opted in, and the controller is not.\n` +
+      `  ev_floor is the one line a merchant is actually free to move.\n\n`,
+  );
 }
 
 /**

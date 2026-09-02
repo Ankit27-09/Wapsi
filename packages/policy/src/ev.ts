@@ -14,11 +14,12 @@ import { ZERO, add, gte, mulBps, sub, type Bps, type Paise } from '@rc/core';
  *    expected value crosses the floor. The schedule length remains as a hard safety
  *    ceiling, but on most transactions it is not the binding constraint — economics is.
  *
- * 2. IT MULTIPLIES BY CONTRIBUTION MARGIN, NOT GROSS AMOUNT. Recovering a rupee of
- *    revenue is not worth a rupee of effort; it is worth its margin. A ₹4 lakh B2B
- *    invoice at 8% margin and a ₹499 subscription at 26% are closer in value than their
- *    sizes suggest, and on a low-margin ticket a single ₹3.50 card retry can genuinely
- *    fail to justify itself.
+ * 2. IT MULTIPLIES BY CONTRIBUTION MARGIN, NOT GROSS AMOUNT — and, for a recurring
+ *    charge, by the cycles still to come. Recovering a rupee of revenue is not worth a
+ *    rupee of effort; it is worth its margin. A ₹4 lakh B2B invoice at 8% margin and a
+ *    ₹499 subscription at 26% over six remaining cycles are closer in value than their
+ *    sizes suggest — and on a low-margin one-off ticket a single ₹3.50 card retry can
+ *    genuinely fail to justify itself.
  *
  * 3. REFUSALS ARE AUDITABLE EVENTS. Both verdicts carry the full arithmetic, so the
  *    system can be asked *why didn't you try?* and answers in rupees rather than in
@@ -32,6 +33,20 @@ export interface EvInput {
   readonly amount: Paise;
   /** Contribution margin in integer basis points. */
   readonly marginBps: Bps;
+  /**
+   * How many times this amount is at stake. 1 for a one-off; the remaining cycle count for
+   * a subscription.
+   *
+   * A failed billing cycle rarely costs one cycle. It usually costs the subscriber, so the
+   * amount at risk is the margin on every cycle that would have followed. Pricing it at one
+   * cycle systematically under-invests in exactly the customers worth the most — the ones
+   * with the longest remaining relationship — and does so invisibly, because the recovery
+   * rate looks fine while the revenue saved does not.
+   *
+   * A multiplier rather than a pre-multiplied amount so the stored `value` is the real
+   * amount at risk, and so the audit row shows why a ₹499 retry justified ₹4 of spend.
+   */
+  readonly valueCycles: number;
   /** Success probability from the PUBLISHED priors. Never from simulator truth. */
   readonly pBps: Bps;
   /** Gateway fee for the rail this attempt would use. */
@@ -76,6 +91,17 @@ export function expected(arithmetic: EvArithmetic): Paise {
 }
 
 /**
+ * Multiply a paise amount by a whole cycle count.
+ *
+ * Lives here rather than in `@rc/core` because it is the only place in the system where a
+ * money amount is scaled by a plain integer, and `Paise` has no `number` constructor
+ * precisely so that such a scaling has to be written down deliberately.
+ */
+function mulCycles(amount: Paise, cycles: number): Paise {
+  return (amount * BigInt(cycles)) as Paise;
+}
+
+/**
  * Evaluate one candidate action.
  *
  * Integer arithmetic end to end — amount in paise, margin in basis points, probability in
@@ -84,7 +110,14 @@ export function expected(arithmetic: EvArithmetic): Paise {
  * floating-point into every expected value in the system through the back door.
  */
 export function evGate(input: EvInput): EvVerdict {
-  const value = mulBps(input.amount, input.marginBps);
+  if (!Number.isInteger(input.valueCycles) || input.valueCycles < 1) {
+    throw new Error(
+      `valueCycles must be a positive integer, got ${input.valueCycles}. A fractional or ` +
+        'zero cycle count would put a float into the money path through the value term.',
+    );
+  }
+
+  const value = mulCycles(mulBps(input.amount, input.marginBps), input.valueCycles);
   const cost = add(add(input.gatewayFee, input.messageCost), input.llmCost);
   const net = sub(mulBps(value, input.pBps), cost);
 

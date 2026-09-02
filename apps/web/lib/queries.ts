@@ -1,5 +1,15 @@
-import { PaiseSchema, ZERO, add, bps, mulBps, sub, type Paise } from '@rc/core';
+import { PaiseSchema, RISK_CLASSES, ZERO, add, bps, mulBps, sub, type Paise, type RiskClass } from '@rc/core';
+import { loadPriorTable } from '@rc/policy';
 import { db } from './db';
+
+/**
+ * The published priors, loaded once per server process.
+ *
+ * Read only to answer "was this cause recoverable at all" — the denominator of the recovery
+ * rate. The console displays decisions the engine already made; it does not make any, so it
+ * has no business consulting a probability for anything else.
+ */
+const PRIORS = loadPriorTable();
 
 /**
  * Reads for the console.
@@ -54,7 +64,7 @@ export async function loadArms(): Promise<readonly ArmRow[]> {
       .execute();
 
     const marginByTxn = new Map(txns.map((t) => [t.id, t.margin_bps]));
-    const recoverable = txns.filter((t) => !isTerminal(trueCodeOf(t.raw))).length;
+    const recoverable = txns.filter((t) => isRecoverable(trueCodeOf(t.raw))).length;
 
     const outcomes = await db()
       .selectFrom('outcome')
@@ -351,6 +361,121 @@ export async function loadByReasonCode(): Promise<
     .sort((a, b) => b.fired + b.refused - (a.fired + a.refused));
 }
 
+export interface RiskClassRow {
+  readonly riskClass: RiskClass;
+  readonly transactions: number;
+  readonly recovered: number;
+  readonly fired: number;
+  readonly refused: number;
+  readonly valueRecovered: Paise;
+  readonly cost: Paise;
+  readonly net: Paise;
+}
+
+/**
+ * The controller's results per risk class.
+ *
+ * The table that answers the question a blended figure cannot: does one engine actually
+ * generalise across five kinds of revenue at risk, or does it work on payments and lose money
+ * on receivables? The aggregate is exactly where a per-class failure would hide.
+ */
+export async function loadByRiskClass(): Promise<readonly RiskClassRow[]> {
+  const batch = await db()
+    .selectFrom('batch')
+    .select('id')
+    .where('seed', '=', SEED)
+    .where('arm', '=', 'rc')
+    .where('world', '=', WORLD)
+    .executeTakeFirst();
+
+  if (batch === undefined) return [];
+
+  const txns = await db()
+    .selectFrom('txn')
+    .select(['id', 'margin_bps', 'risk_class'])
+    .where('batch_id', '=', batch.id)
+    .execute();
+
+  const classByTxn = new Map(txns.map((t) => [t.id, t.risk_class]));
+  const marginByTxn = new Map(txns.map((t) => [t.id, t.margin_bps]));
+
+  const acc = new Map(
+    RISK_CLASSES.map((riskClass) => [
+      riskClass,
+      {
+        transactions: 0,
+        recovered: 0,
+        fired: 0,
+        refused: 0,
+        valueRecovered: ZERO,
+        cost: ZERO,
+      },
+    ]),
+  );
+
+  for (const txn of txns) {
+    const slice = acc.get(txn.risk_class);
+    if (slice !== undefined) slice.transactions += 1;
+  }
+
+  const decisions = await db()
+    .selectFrom('decision')
+    .leftJoin('outcome', 'outcome.decision_id', 'decision.id')
+    .leftJoin('message_send', 'message_send.decision_id', 'decision.id')
+    .select([
+      'decision.txn_id as txn_id',
+      'decision.verdict as verdict',
+      'outcome.success as success',
+      'outcome.fee_paise as fee_paise',
+      'outcome.recovered_paise as recovered_paise',
+      'message_send.cost_paise as message_cost_paise',
+    ])
+    .where('decision.batch_id', '=', batch.id)
+    .execute();
+
+  for (const row of decisions) {
+    const slice = acc.get(classByTxn.get(row.txn_id) ?? 'payment_failure');
+    if (slice === undefined) continue;
+
+    if (row.verdict === 'fire') slice.fired += 1;
+    else slice.refused += 1;
+
+    if (row.fee_paise !== null) {
+      slice.cost = add(slice.cost, PaiseSchema.parse(row.fee_paise));
+    }
+    if (row.message_cost_paise !== null) {
+      slice.cost = add(slice.cost, PaiseSchema.parse(row.message_cost_paise));
+    }
+
+    if (row.success === true && row.recovered_paise !== null) {
+      const margin = marginByTxn.get(row.txn_id);
+      if (margin === undefined) continue;
+      slice.recovered += 1;
+      slice.valueRecovered = add(
+        slice.valueRecovered,
+        mulBps(PaiseSchema.parse(row.recovered_paise), bps(margin)),
+      );
+    }
+  }
+
+  // Every class is returned, including empty ones. An absent row reads as "not implemented";
+  // a zero row reads as "nothing to do", and those are different claims to be making.
+  return RISK_CLASSES.map((riskClass) => {
+    const slice = acc.get(riskClass);
+    if (slice === undefined) throw new Error(`unreachable: no accumulator for ${riskClass}`);
+    return {
+      riskClass,
+      transactions: slice.transactions,
+      recovered: slice.recovered,
+      fired: slice.fired,
+      refused: slice.refused,
+      valueRecovered: slice.valueRecovered,
+      cost: slice.cost,
+      net: sub(slice.valueRecovered, slice.cost),
+    };
+  });
+}
+
 // ---------------------------------------------------------------------------
 
 function trueCodeOf(raw: unknown): string {
@@ -359,7 +484,23 @@ function trueCodeOf(raw: unknown): string {
   return typeof simulator?.true_reason_code === 'string' ? simulator.true_reason_code : 'unknown';
 }
 
-const TERMINAL = new Set(['card_expired', 'mandate_expired', 'suspected_fraud_block', 'unknown']);
-function isTerminal(code: string): boolean {
-  return TERMINAL.has(code);
+/**
+ * Whether the published evidence offers ANY path to recovering this cause.
+ *
+ * The denominator of the recovery rate, and it reads the real prior table rather than a
+ * hardcoded list. There used to be a `TERMINAL` set here — a copy of four reason codes from
+ * the taxonomy — and it was a copy that went stale the moment the taxonomy grew: thirteen of
+ * the eighteen codes are now terminal, because nothing was ever charged on an abandoned
+ * checkout or an overdue invoice, and every one of them is recoverable by other means.
+ *
+ * The stale set therefore counted nine recoverable classes as unrecoverable and inflated the
+ * recovery rate this console displays, while the report next to it used the correct
+ * denominator. Two numbers on one submission disagreeing about the same batch is worse than
+ * either being wrong.
+ *
+ * Deliberately the same predicate `computeMetrics` uses, from the same table, so the console
+ * and the report cannot drift again.
+ */
+function isRecoverable(code: string): boolean {
+  return PRIORS.rows.some((row) => row.reason_code === code && row.p_bps > 0);
 }

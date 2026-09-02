@@ -76,6 +76,66 @@ export function isWithinLocalWindow(
   return start <= end ? now >= start && now < end : now >= start || now < end;
 }
 
+/**
+ * The next instant at or after `instant` that falls OUTSIDE a local window.
+ *
+ * WHY THIS EXISTS, because it is the difference between a system that recovers money and one
+ * that merely refuses to misbehave.
+ *
+ * Quiet hours must never be violated. But there are two ways to honour them, and they are
+ * not equivalent. For a RETRY, suppressing the message and letting the charge proceed
+ * silently is right — the customer is not involved. For an action whose entire mechanism IS
+ * the message — a payment link, a pre-debit notice, a re-authorisation request — cancelling
+ * it does not protect the customer from anything. It just abandons the recovery, because a
+ * link that was going to arrive at 03:00 was always going to be read at 09:00.
+ *
+ * So a message-only action is DEFERRED to the edge of the window rather than dropped.
+ * Measured: cancelling instead of deferring cost the four messaging classes most of their
+ * recoverable value, because attempt landings are spread uniformly across the clock and
+ * quiet hours are half of it.
+ *
+ * Returns `instant` unchanged when it is already outside the window.
+ */
+export function deferPastLocalWindow(
+  instant: Date,
+  window: { readonly start: string; readonly end: string; readonly tz: string },
+): Date {
+  if (!isWithinLocalWindow(instant, window)) return instant;
+
+  const nowMinutes = minutesSinceMidnight(localClock(instant, window.tz));
+  const end = parseHHMM(window.end);
+
+  // Minutes to wait until the window's end, wrapping across midnight when the window does.
+  const wait = end > nowMinutes ? end - nowMinutes : 1440 - nowMinutes + end;
+
+  // Truncated to the minute first, so the result lands exactly on the boundary rather than
+  // carrying the original instant's seconds past it — which would leave a send one second
+  // inside a window it was deferred out of, and the bound would block it again.
+  const truncated = instant.getTime() - (instant.getTime() % 60_000);
+  return new Date(truncated + wait * 60_000);
+}
+
+/**
+ * The next instant at or after `instant` that falls INSIDE a local window.
+ *
+ * The mirror of the above, for a window that PERMITS rather than forbids: outbound calling
+ * is allowed only between 10:00 and 19:00, so a call scheduled for 21:00 waits for morning
+ * instead of being abandoned.
+ */
+export function deferIntoLocalWindow(
+  instant: Date,
+  window: { readonly start: string; readonly end: string; readonly tz: string },
+): Date {
+  if (isWithinLocalWindow(instant, window)) return instant;
+
+  const nowMinutes = minutesSinceMidnight(localClock(instant, window.tz));
+  const start = parseHHMM(window.start);
+
+  const wait = start > nowMinutes ? start - nowMinutes : 1440 - nowMinutes + start;
+  const truncated = instant.getTime() - (instant.getTime() % 60_000);
+  return new Date(truncated + wait * 60_000);
+}
+
 export const HHMMSchema = z.string().regex(HHMM, 'Expected HH:MM in 24-hour form');
 
 export const TimeWindowSchema = z.object({

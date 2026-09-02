@@ -47,6 +47,7 @@ export interface Database {
   batch_budget: BatchBudgetTable;
   reason_code: ReasonCodeTable;
   txn: TxnTable;
+  promise: PromiseTable;
   failure_event: FailureEventTable;
   classification: ClassificationTable;
   decision: DecisionTable;
@@ -74,10 +75,10 @@ export interface Database {
 // without a migration. The CHECK constraints remain the authority; these are the
 // compile-time echo of them.
 
-export type Channel = 'sms' | 'whatsapp' | 'email';
+export type Channel = 'sms' | 'whatsapp' | 'email' | 'voice';
 export type ConsentState = 'opt_in' | 'opt_out';
 export type Rail = 'card' | 'upi_collect' | 'upi_intent' | 'netbanking' | 'wallet';
-export type Arm = 'rc' | 'b0' | 'b1' | 'b2' | 'b3_oracle';
+export type Arm = 'rc' | 'b0' | 'b1' | 'b2' | 'b3_oracle' | 'b4';
 /**
  * Ablation arms. `oracle` reads the simulator's seeded cause — a measurement ceiling that
  * isolates the cost of imperfect classification, never a deployable strategy.
@@ -91,7 +92,33 @@ export type Verdict =
   | 'refuse_terminal'
   | 'refuse_kill_switch';
 
-export type PlannedAction = 'retry' | 'switch_rail' | 'notify' | 'escalate' | 'none';
+export type PlannedAction =
+  | 'retry'
+  | 'switch_rail'
+  | 'notify'
+  | 'escalate'
+  | 'none'
+  | 'payment_link'
+  | 'remandate'
+  | 'pre_debit_notify'
+  | 'await_promise';
+
+/**
+ * What kind of revenue is at risk.
+ *
+ * One decision engine, five classes. The differences between them turned out to be inputs
+ * the expected-value gate already takes — which causes are possible, which interventions are
+ * legal, and how value and cost are computed — rather than separate code paths.
+ */
+export type RiskClass =
+  | 'payment_failure'
+  | 'subscription_failure'
+  | 'mandate_lapsed'
+  | 'checkout_abandonment'
+  | 'receivable_overdue';
+
+export type PromiseStatus = 'open' | 'kept' | 'broken' | 'superseded';
+export type PromiseSource = 'sms_reply' | 'voice_call' | 'payment_page' | 'agent_note';
 
 /**
  * Timing buckets, mirrored from `priors.published.yaml`.
@@ -106,7 +133,14 @@ export type Timing =
   | 'medium_backoff'
   | 'next_day'
   | 'salary_window'
-  | 'alt_rail';
+  | 'alt_rail'
+  // Domain timings rather than retry backoffs: the notice period an e-mandate debit
+  // requires, the last point inside the permitted retry window, the buyer's payment run,
+  // and the day after a promise broke.
+  | 'pre_debit_window'
+  | 'late_window'
+  | 'payment_run_window'
+  | 'promise_followup';
 export type DecisionState = 'planned' | 'pending' | 'settled' | 'abandoned';
 export type TemplateStatus = 'registered' | 'draft_pending_review' | 'retired';
 export type ProposalStatus = 'awaiting' | 'approved' | 'rejected';
@@ -128,6 +162,14 @@ export interface CustomerTable {
   display_name: string;
   /** Which registered template variant this customer receives. `hi_latn` is Hinglish. */
   preferred_language: Generated<'en' | 'hi_latn'>;
+  /**
+   * On the NCPR / DND registry.
+   *
+   * Blocks outbound VOICE regardless of merchant-level consent, and is deliberately not a
+   * `consent_event` row: consent is an agreement with the merchant, this is a standing
+   * instruction to the regulator. Collapsing them loses the distinction that matters.
+   */
+  on_ncpr_registry: Generated<boolean>;
   created_at: CreatedAt;
 }
 
@@ -193,6 +235,37 @@ export interface TxnTable {
   is_recurring: Generated<boolean>;
   mandate_ref: string | null;
   failed_at: Timestamp;
+  /** What kind of revenue is at risk. See `012_risk_classes.sql`. */
+  risk_class: Generated<RiskClass>;
+  /**
+   * Expected remaining billing cycles if a subscription is saved.
+   *
+   * Non-null exactly when `risk_class = 'subscription_failure'`, enforced by a CHECK, so a
+   * subscription cannot exist without the horizon its value term depends on.
+   */
+  lifetime_cycles: number | null;
+  /** Non-null exactly for receivables. B2B behaviour is driven by age, not attempt count. */
+  days_overdue: number | null;
+  created_at: CreatedAt;
+}
+
+/**
+ * Customer commitments to pay by a date.
+ *
+ * Primarily a SUPPRESSION mechanism rather than a tracker. An open promise stops the ladder
+ * until its date, because chasing someone who has already committed spends money to make the
+ * outcome worse — and a broken promise then changes the right action, not merely the odds.
+ */
+export interface PromiseTable {
+  id: Generated<number>;
+  customer_id: string;
+  txn_id: string;
+  promised_paise: Bigint;
+  promised_for: Timestamp;
+  obtained_via: PromiseSource;
+  obtained_at: Timestamp;
+  status: Generated<PromiseStatus>;
+  resolved_at: Timestamp | null;
   created_at: CreatedAt;
 }
 
@@ -232,6 +305,14 @@ export interface DecisionTable {
   evaluated_at: CreatedAt;
   verdict: Verdict;
   refuse_detail: string | null;
+  /**
+   * WHICH bound refused, as a queryable value.
+   *
+   * Null exactly when the verdict is `fire`, enforced by a CHECK. `refuse_detail` remains the
+   * sentence an operator reads about one exception; this is what makes "the consent bound
+   * cost us ₹X this batch" a query rather than a grep.
+   */
+  refuse_rule: string | null;
   planned_action: PlannedAction;
   planned_rail: Rail | null;
   /** Required for a fired decision, null for a refusal. Enforced by CHECK. */

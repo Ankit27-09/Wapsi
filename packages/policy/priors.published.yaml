@@ -47,6 +47,19 @@ timings:
   next_day: "roughly twenty-four hours later"
   salary_window: "48-96 hours later, aligned to the customer's observed credit day"
   alt_rail: "re-presented on a different rail rather than retried on the same one"
+  pre_debit_window: "24 hours before the intended debit, the RBI e-mandate minimum"
+  late_window: "five days out, the last point inside the permitted e-mandate retry window"
+  payment_run_window: "roughly five days out, to land before the buyer's next payment run"
+  promise_followup: "the day after a promise-to-pay date passed unpaid"
+
+# `kind` — what a prior is a probability OF.
+#
+# A row with no `kind` means `charge`: a re-presentment, where attempt number and
+# timing are the whole story. The other kinds are different questions entirely —
+# "will this customer tap a link", "will they re-authorise a mandate" — and giving
+# them their own rows is what stops a payment link from being priced with a retry's
+# probability. `charge` deliberately covers both retry and switch_rail, because the
+# rail a charge lands on is already carried by the timing bucket.
 
 # -----------------------------------------------------------------------------
 # Structural zeros
@@ -55,16 +68,68 @@ timings:
 # retrying rarely works. Listing them explicitly means the EV gate can never be
 # handed a nonzero prior for a code where success is impossible — the single most
 # expensive modelling error available on this problem.
+#
+# `scope` matters as much as the entry itself:
+#
+#   charging  No re-presentment can succeed. Says NOTHING about whether the money
+#             is recoverable — a lapsed mandate cannot be debited, and can very
+#             much be re-authorised. Conflating the two writes off collectable
+#             revenue, which is the mirror-image error of retrying an expired card.
+#   all       Nothing may fire, for reasons of risk or ignorance rather than
+#             mechanism. Any prior for such a code is a contradiction and the
+#             loader refuses it.
 # -----------------------------------------------------------------------------
 structural_zeros:
   - reason_code: card_expired
+    scope: charging
     why: "The stored instrument's expiry is in the past. No retry changes that."
   - reason_code: mandate_expired
-    why: "There is no live authorisation to debit. Needs re-authorisation."
+    scope: charging
+    why: >-
+      There is no live authorisation to debit, so every charge is zero forever. A
+      re-authorisation is a different action with a real success rate, which is why
+      this is scoped rather than absolute.
   - reason_code: suspected_fraud_block
+    scope: all
     why: "Never retried and never contacted. Retrying past a risk decision is worse than the loss."
   - reason_code: unknown
+    scope: all
     why: "No intervention fires on an unclassified root cause."
+
+  # The four checkout stages and the five receivable causes are all `terminal` in the
+  # taxonomy — nothing was charged, so nothing can be re-presented — but they are the
+  # most recoverable classes in the system. They appear here scoped to `charging` so the
+  # engine is structurally unable to attempt a charge on them, while payment_link and
+  # notify priors below give their real recovery paths a price.
+  - reason_code: abandoned_at_cart
+    scope: charging
+    why: "Nothing was ever charged. There is no instrument or authorisation to re-present."
+  - reason_code: abandoned_at_address
+    scope: charging
+    why: "Nothing was ever charged. There is no instrument or authorisation to re-present."
+  - reason_code: abandoned_at_payment
+    scope: charging
+    why: "Nothing was ever charged; the customer never chose a method."
+  - reason_code: abandoned_at_otp
+    scope: charging
+    why: >-
+      The card was entered but authentication never completed, so no mandate or token
+      exists to charge against. A fresh link is the only path — and a strong one.
+  - reason_code: awaiting_approval
+    scope: charging
+    why: "An invoice is not an instrument. There is nothing to debit."
+  - reason_code: disputed_line_item
+    scope: charging
+    why: "An invoice is not an instrument, and this one is contested."
+  - reason_code: payment_run_cycle
+    scope: charging
+    why: "An invoice is not an instrument. There is nothing to debit."
+  - reason_code: no_response
+    scope: charging
+    why: "An invoice is not an instrument. There is nothing to debit."
+  - reason_code: promised_not_paid
+    scope: charging
+    why: "An invoice is not an instrument. There is nothing to debit."
 
 # -----------------------------------------------------------------------------
 # Priors
@@ -185,3 +250,336 @@ priors:
       with the instrument or the issuer, so an immediate re-present is both the
       cheapest and the most likely to succeed.
     # TODO(cite): gateway reliability disclosures.
+
+  # --- charges that follow a pre-debit notice ---------------------------------
+  # All of these are attempt 2 or 3 because the notice occupies attempt 1, and all of
+  # them are at 72h or later because a debit cannot legally precede its notice by less
+  # than 24. That constraint is why there is no short-backoff row here: on a mandate
+  # rail those timings do not exist, however well they would have worked.
+  - reason_code: insufficient_funds
+    attempt: 3
+    timing: late_window
+    p_bps: 1600
+    source: ASSUMED
+    assumption: >-
+      A final debit five days out, on the population that survived a notice and a
+      salary-aligned attempt. Priced down sharply so the gate stops rather than the cap.
+
+  - reason_code: issuer_down
+    attempt: 2
+    timing: salary_window
+    p_bps: 8600
+    source: ASSUMED
+    assumption: >-
+      By 72 hours essentially every issuer incident has resolved, so the debit itself is
+      very likely to authorise. HIGHER than the same code's short-backoff row, which is
+      the honest consequence of being forced to wait: the regime costs three days of
+      working capital and buys a better success rate.
+
+  - reason_code: issuer_down
+    attempt: 3
+    timing: late_window
+    p_bps: 2400
+    source: ASSUMED
+    assumption: >-
+      Conditional on a 72-hour debit having failed, the cause was not the outage. Priced
+      low.
+
+  - reason_code: do_not_honour
+    attempt: 2
+    timing: salary_window
+    p_bps: 1700
+    source: ASSUMED
+    assumption: >-
+      Slightly better than the one-off next-day probe, because the notice gave the
+      customer 24 hours to lift a card control or fund the account.
+
+  - reason_code: network_timeout
+    attempt: 2
+    timing: salary_window
+    p_bps: 5200
+    source: ASSUMED
+    assumption: >-
+      A transport failure is long resolved by 72 hours, so the debit is limited only by
+      the instrument and the balance. Below the immediate one-off figure because the
+      surviving population includes failures that were never really transport.
+
+  # ===========================================================================
+  # NON-CHARGING INTERVENTIONS
+  #
+  # Everything below has a `kind`, and every one of them is a question about a
+  # PERSON rather than about an instrument. That is why they need their own rows:
+  # a retry's odds turn on balances and issuer availability, while a payment
+  # link's turn on how much the customer wanted the thing in the first place.
+  #
+  # These are also where the economics change shape. None of them presents a
+  # charge, so none incurs a gateway fee — the entire cost is the message. A
+  # payment link at 18 paise clears the expected-value floor at a probability a
+  # ₹3.50 card retry never could, which is the mechanical reason the checkout and
+  # receivables classes recover so much of what they lose.
+  # ===========================================================================
+
+  # --- pre-debit notification -------------------------------------------------
+  # RBI requires this before an e-mandate debit, so the engine sends it whether or
+  # not it helps. It does help, though, and the prior says how: it is the only
+  # message in the system whose recipient is told in advance that money is about to
+  # be taken, which is exactly the notice a customer needs to fund the account.
+  - reason_code: insufficient_funds
+    attempt: 1
+    timing: pre_debit_window
+    kind: pre_debit_notify
+    p_bps: 2200
+    source: ASSUMED
+    assumption: >-
+      Probability that the notification alone results in payment — the customer funds
+      the account or pays through the link in the notice, before the debit is even
+      presented. Priced well below a salary-aligned retry but well above a generic
+      reminder, because it names a date and an amount.
+    # TODO(cite): RBI e-mandate pre-debit notification circular; recovery data is unlikely
+    # to be public, so this figure will probably stay ASSUMED and keep the wider band.
+
+  - reason_code: issuer_down
+    attempt: 1
+    timing: pre_debit_window
+    kind: pre_debit_notify
+    p_bps: 400
+    source: ASSUMED
+    assumption: >-
+      The notice is legally required before the debit, but an issuer outage is not
+      something the customer can act on, so its standalone recovery is near zero. Kept
+      non-zero only because some recipients pay by another route.
+
+  - reason_code: do_not_honour
+    attempt: 1
+    timing: pre_debit_window
+    kind: pre_debit_notify
+    p_bps: 1300
+    source: ASSUMED
+    assumption: >-
+      A meaningful share of this code on subscriptions is a card control or limit the
+      customer can lift once they know a debit is coming.
+
+  - reason_code: network_timeout
+    attempt: 1
+    timing: pre_debit_window
+    kind: pre_debit_notify
+    p_bps: 300
+    source: ASSUMED
+    assumption: "Nothing the customer does affects a transport failure."
+
+  # --- re-authorisation -------------------------------------------------------
+  # The mandate is gone; the relationship may not be. Asking for a fresh
+  # authorisation is the only action with a non-zero probability, and it has a real
+  # one — which is the whole reason `mandate_expired` is scoped to `charging` above
+  # rather than written off entirely.
+  - reason_code: mandate_expired
+    attempt: 1
+    timing: next_day
+    kind: remandate
+    p_bps: 2400
+    source: ASSUMED
+    assumption: >-
+      A customer whose subscription mandate lapsed usually still wants the service —
+      the lapse is administrative, not a cancellation. Priced as a strong first ask
+      and well below a retry on a working instrument.
+
+  - reason_code: mandate_expired
+    attempt: 2
+    timing: salary_window
+    kind: remandate
+    p_bps: 1100
+    source: ASSUMED
+    assumption: >-
+      A follow-up reaches customers who ignored the first ask. Materially lower, and
+      the schedule stops after it.
+
+  - reason_code: card_expired
+    attempt: 1
+    timing: next_day
+    kind: remandate
+    p_bps: 2000
+    source: ASSUMED
+    assumption: >-
+      Updating a stored card is a smaller ask than a fresh mandate but reaches a
+      customer who has done nothing wrong and may not have noticed. Priced just below
+      the re-authorisation case.
+
+  - reason_code: card_expired
+    attempt: 2
+    timing: salary_window
+    kind: remandate
+    p_bps: 900
+    source: ASSUMED
+    assumption: "One follow-up, priced as a reminder rather than a fresh ask."
+
+  - reason_code: do_not_honour
+    attempt: 3
+    timing: late_window
+    kind: remandate
+    p_bps: 1000
+    source: ASSUMED
+    assumption: >-
+      After a notice and a failed probe, a fresh authorisation is the only remaining
+      productive action. Low, and the schedule ends here.
+
+  # --- checkout recovery links ------------------------------------------------
+  # HOW FAR THEY GOT IS THE SIGNAL, and these numbers are the whole argument for
+  # splitting the funnel into four causes instead of one. The OTP screen and the cart
+  # differ by more than 5x at the first attempt. A single blended
+  # "abandoned checkout" prior would spend the same on both and be wrong twice.
+  - reason_code: abandoned_at_otp
+    attempt: 1
+    timing: immediate
+    kind: payment_link
+    p_bps: 3800
+    source: ASSUMED
+    assumption: >-
+      The card was entered and authentication did not complete. The customer is
+      usually still present, and the common causes — an OTP that never arrived, an
+      expired session — are fixed outright by a fresh link. The strongest recovery
+      probability anywhere in this file, and the reason speed matters here.
+    # TODO(cite): published checkout-abandonment recovery benchmarks by funnel stage.
+
+  - reason_code: abandoned_at_otp
+    attempt: 2
+    timing: short_backoff
+    kind: payment_link
+    p_bps: 1500
+    source: ASSUMED
+    assumption: "A second link reaches those who stepped away rather than gave up."
+
+  - reason_code: abandoned_at_otp
+    attempt: 3
+    timing: next_day
+    kind: payment_link
+    p_bps: 600
+    source: ASSUMED
+    assumption: >-
+      Next-day recovery of an authentication drop-off is mostly customers who bought
+      elsewhere. Low enough that the floor decides.
+
+  - reason_code: abandoned_at_payment
+    attempt: 1
+    timing: short_backoff
+    kind: payment_link
+    p_bps: 2100
+    source: ASSUMED
+    assumption: >-
+      Reached method selection and left. Often a missing preferred method rather than
+      a change of mind, and a link that offers the full set addresses that directly.
+
+  - reason_code: abandoned_at_payment
+    attempt: 2
+    timing: next_day
+    kind: payment_link
+    p_bps: 800
+    source: ASSUMED
+    assumption: "A next-day reminder, priced as a nudge rather than a fix."
+
+  - reason_code: abandoned_at_address
+    attempt: 1
+    timing: medium_backoff
+    kind: payment_link
+    p_bps: 1200
+    source: ASSUMED
+    assumption: >-
+      Intent is real but something interrupted, frequently a delivery charge or
+      timeline revealed at this step. A few hours does not worsen it.
+
+  - reason_code: abandoned_at_address
+    attempt: 2
+    timing: next_day
+    kind: payment_link
+    p_bps: 500
+    source: ASSUMED
+    assumption: "A second attempt on a mid-funnel exit is a genuine long shot."
+
+  - reason_code: abandoned_at_cart
+    attempt: 1
+    timing: next_day
+    kind: payment_link
+    p_bps: 700
+    source: ASSUMED
+    assumption: >-
+      The weakest intent signal in the funnel — much of this population was browsing
+      and never intended to buy. Deliberately low: on a small basket this will not
+      clear the floor, and that refusal is the correct answer rather than a timid one.
+
+  # --- receivables ------------------------------------------------------------
+  # B2B non-payment is a process problem, so these priors are about WHO is reached and
+  # WHEN, not about persistence. The payment-run reminder is the highest-probability
+  # non-charging row in the file, and it is a single message.
+  - reason_code: payment_run_cycle
+    attempt: 1
+    timing: payment_run_window
+    kind: notify
+    p_bps: 5500
+    source: ASSUMED
+    assumption: >-
+      The buyer pays on a fixed cycle and this invoice missed it. Nothing is disputed
+      and nobody is refusing — a reminder that lands before the next run gets it into
+      that run. The highest non-charging probability here, and the clearest case in the
+      system that timing beats volume.
+    # TODO(cite): B2B DSO / payment-cycle behaviour studies.
+
+  - reason_code: awaiting_approval
+    attempt: 1
+    timing: next_day
+    kind: notify
+    p_bps: 2600
+    source: ASSUMED
+    assumption: >-
+      Asking the contact to route the invoice to its approver. Works often enough to
+      be the first action, and it is the only one that addresses the actual blocker.
+
+  - reason_code: awaiting_approval
+    attempt: 2
+    timing: payment_run_window
+    kind: notify
+    p_bps: 3200
+    source: ASSUMED
+    assumption: >-
+      HIGHER than attempt 1, and deliberately so. The surviving population is invoices
+      that did reach an approver and then waited, so the second message lands on
+      something already moving and times it to the run.
+
+  - reason_code: no_response
+    attempt: 1
+    timing: next_day
+    kind: notify
+    p_bps: 1400
+    source: ASSUMED
+    assumption: >-
+      A first chase on a silent invoice. Low: silence usually means the invoice never
+      entered the buyer's workflow.
+
+  - reason_code: no_response
+    attempt: 2
+    timing: payment_run_window
+    kind: notify
+    p_bps: 1000
+    source: ASSUMED
+    assumption: "A second message to a buyer who ignored the first."
+
+  - reason_code: no_response
+    attempt: 3
+    timing: payment_run_window
+    kind: notify
+    p_bps: 2300
+    source: ASSUMED
+    assumption: >-
+      This step is a CALL, not a message, which is why it is priced above attempt 2
+      despite a more resistant population: a call reaches a person and cannot be
+      filtered. It also costs 22x an SMS, so the gate refuses it on small invoices —
+      which is precisely the trade-off the voice channel exists to expose.
+
+  - reason_code: promised_not_paid
+    attempt: 1
+    timing: promise_followup
+    kind: notify
+    p_bps: 3100
+    source: ASSUMED
+    assumption: >-
+      A call the day after a promise broke. The buyer has already committed verbally,
+      so the ask is small and specific — and another SMS is exactly what they ignored.
+      Priced high, on a population that self-selected by making a commitment.

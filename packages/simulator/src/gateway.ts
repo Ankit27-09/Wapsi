@@ -12,7 +12,12 @@ import {
 } from '@rc/core';
 import type { Db } from '@rc/db';
 import { deriveRng } from './rng.js';
-import { loadTruthModel, type TruthModel, type TruthTiming } from './truth.js';
+import {
+  loadTruthModel,
+  type TruthKind,
+  type TruthModel,
+  type TruthTiming,
+} from './truth.js';
 
 /**
  * The seeded gateway.
@@ -50,6 +55,13 @@ export const TIMING_HOURS: Readonly<Record<TruthTiming, number>> = {
   next_day: 24,
   salary_window: 72,
   alt_rail: 0.1,
+  // The domain-specific buckets. Monotonically ordered against the ones above, because a
+  // schedule whose later steps land earlier than its earlier ones is a schedule that reads
+  // correctly and behaves arbitrarily.
+  pre_debit_window: 24,
+  late_window: 120,
+  payment_run_window: 120,
+  promise_followup: 36,
 };
 
 /**
@@ -170,7 +182,12 @@ function decide(
     throw new Error(`No issuer known for customer ${context.customerId}`);
   }
 
-  const fee = feeFor(request.rail);
+  // Only an action that presents a charge incurs a fee. A payment link, a pre-debit notice
+  // and a re-authorisation request touch no rail, so charging them ₹3.50 would make the
+  // simulator disagree with the policy about the cost of the very actions the new risk
+  // classes depend on — and the disagreement would surface as an unexplained gap between
+  // priced and realised cost rather than as an error.
+  const fee = context.kind === 'charge' ? feeFor(request.rail) : ZERO;
 
   // COMMON RANDOM NUMBERS, keyed on the transaction's world-independent position rather
   // than on its primary key.
@@ -184,7 +201,7 @@ function decide(
   // Call order still cannot change the answer: the key is a pure function of the attempt.
   const rng = deriveRng(
     deps.seed,
-    `${context.logicalRef}:${context.attemptNo}:${context.timing}`,
+    `${context.logicalRef}:${context.attemptNo}:${context.timing}:${context.kind}`,
   );
   const succeeded = deps.truth.attemptSucceeds(
     rng,
@@ -192,16 +209,29 @@ function decide(
     context.attemptNo,
     context.timing,
     issuer,
+    context.kind,
   );
 
   return {
     succeeded,
     // A real gateway returns a code on failure and little on success. Mirrored here so the
     // classifier's input on a retry looks like the input on the original failure.
-    code: succeeded ? 'CAPTURED' : `DECLINED_${context.reasonCode.toUpperCase()}`,
-    // The fee is charged either way. That is the entire reason net value differs from
-    // recovery rate, and the reason a naive retry-everything arm bleeds.
+    //
+    // A non-charging action gets its own vocabulary, because it did not go anywhere near an
+    // issuer: a payment link that goes unused is not a decline, and labelling it one would
+    // feed the classifier a failure string that never existed.
+    code: succeeded
+      ? context.kind === 'charge'
+        ? 'CAPTURED'
+        : 'CUSTOMER_ACTED'
+      : context.kind === 'charge'
+        ? `DECLINED_${context.reasonCode.toUpperCase()}`
+        : `NO_ACTION_${context.kind.toUpperCase()}`,
     fee,
+    // What was actually collected — ONE amount, even for a subscription whose value term is
+    // several cycles. The lifetime multiplier belongs in the decision's expected value,
+    // where it changes what the engine is willing to spend; putting it here would inflate
+    // the headline recovery figure with money nobody has received yet.
     recovered: succeeded ? request.amount : ZERO,
   };
 }
@@ -218,6 +248,32 @@ interface ParsedContext {
   readonly reasonCode: Parameters<TruthModel['successProbability']>[0];
   readonly attemptNo: number;
   readonly timing: TruthTiming;
+  /** What the action IS. Decides both the fee and which truth row is consulted. */
+  readonly kind: TruthKind;
+}
+
+/**
+ * Which truth question an action asks.
+ *
+ * Duplicated from `priorKindFor` in @rc/policy for the usual reason: importing it would
+ * breach the wall. `truthMirrorsPolicyKinds` in the tests asserts the two stay in step.
+ */
+function kindForAction(action: string): TruthKind {
+  switch (action) {
+    case 'retry':
+    case 'switch_rail':
+      return 'charge';
+    case 'payment_link':
+      return 'payment_link';
+    case 'notify':
+      return 'notify';
+    case 'pre_debit_notify':
+      return 'pre_debit_notify';
+    case 'remandate':
+      return 'remandate';
+    default:
+      throw new Error(`Gateway context carries an action the simulator cannot price: ${action}`);
+  }
 }
 
 /**
@@ -261,11 +317,20 @@ function parseContext(context: Readonly<Record<string, string>>): ParsedContext 
     throw new Error(`Invalid attempt_no "${attemptRaw}" in gateway context`);
   }
 
+  const actionRaw = context['action'];
+  if (actionRaw === undefined) {
+    throw new Error(
+      'Gateway context is missing action; without it the simulator would charge a card fee ' +
+        'for a payment link and draw its outcome from the wrong distribution',
+    );
+  }
+
   return {
     customerId,
     logicalRef,
     reasonCode: ReasonCodeSchema.parse(reasonCodeRaw),
     attemptNo,
     timing,
+    kind: kindForAction(actionRaw),
   };
 }

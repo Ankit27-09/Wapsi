@@ -25,6 +25,13 @@ import type { Classification, ClassificationInput, Classifier } from './classifi
  *
  * ISO 8583 codes used below are the real ones. Recognising a bare `05` is the sort of thing
  * a payments engineer does instantly, so a fair baseline gets to do it too.
+ *
+ * The table covers checkout abandonment and overdue receivables as well as payment declines,
+ * because the system does — and a baseline that had no rules for two thirds of the taxonomy
+ * would be the strawman this file exists to avoid. Those rules come from the vocabulary
+ * checkout analytics and accounts-receivable teams actually use, and they are deliberately
+ * conservative: each requires an unambiguous domain signal, so a string that reads like a
+ * payment decline is still handled by the payments rules.
  */
 
 /**
@@ -54,6 +61,45 @@ interface Rule {
  * instead of switching rail.
  */
 const RULES: readonly Rule[] = [
+  // =========================================================================
+  // CHECKOUT FUNNEL AND RECEIVABLES
+  //
+  // Placed FIRST, and only because these patterns require an unambiguous
+  // domain signal — a funnel-exit token, or accounts-receivable vocabulary.
+  // Anything that could also be a payment decline is left to the payments
+  // rules below.
+  //
+  // Same discipline as the rest of the file: written from the vocabulary these
+  // systems actually emit, not from the simulator's string pool. Checkout
+  // analytics speak in funnel steps (`funnel_exit`, `step=`, `session
+  // expired`); receivables teams speak in `AP hold`, `payment run`, `PTP`,
+  // `short paid` — all standard terms in those trades.
+  // =========================================================================
+
+  // ---- receivables: the blocker is a process, and the process is named ----
+  // Approval before dispute, because an invoice can be both queried AND awaiting an
+  // approver, and the approver is the actionable half.
+  { pattern: /\bap[ _-]?hold\b|awaiting[ _-]?(?:approval|approver)|pending[ _-]approval|approval[ _-]?(?:chain|workflow|queue)|with the approver|sign[ _-]?off/i, code: 'awaiting_approval', confidence: CONFIDENCE_STRONG_PHRASE },
+  { pattern: /\bptp\b|promise[ _-]?to[ _-]?pay|promised[ _-](?:date|payment|to pay)|committed to pay/i, code: 'promised_not_paid', confidence: CONFIDENCE_STRONG_PHRASE },
+  { pattern: /disput|short[ _-]?paid|line[ _-]?item[ _-]?quer|billing[ _-]?quer|contested/i, code: 'disputed_line_item', confidence: CONFIDENCE_STRONG_PHRASE },
+  { pattern: /payment[ _-]?run|remittance[ _-]?(?:run|cycle)|payment[ _-]?cycle|missed the run|next run|cut[ _-]?off/i, code: 'payment_run_cycle', confidence: CONFIDENCE_STRONG_PHRASE },
+
+  // `no_response` lives further down, AFTER the payments rules. It matched "bank server not
+  // responding" and filed an issuer outage as a collections problem — the rule is the
+  // broadest in the file and it has to be the last thing tried, not among the first.
+
+  // ---- checkout: the funnel step is the signal ----------------------------
+  // Each of these needs BOTH a stage word and an abandonment word, because the stage words
+  // alone are ambiguous. "otp" in particular is a payments term first: an OTP failure during
+  // an authorisation is a 3DS timeout, and only an OTP exit during checkout is an
+  // abandonment. Requiring the abandonment token keeps that distinction honest, and it means
+  // this rule genuinely misses strings that mention only `acs` and `otp` — a failure the
+  // ablation should show rather than one to engineer away.
+  { pattern: /(?=.*(?:abandon|funnel[ _-]?exit|drop[ _-]?off|dropped|left|exit|session[ _-]?(?:end|ended|expired)|not[ _-]?entered|did not (?:complete|enter)))(?=.*\botp\b)/i, code: 'abandoned_at_otp', confidence: CONFIDENCE_STRONG_PHRASE },
+  { pattern: /(?=.*(?:abandon|funnel[ _-]?exit|drop[ _-]?off|dropped|left|exit|session[ _-]?(?:end|ended|expired)|did not (?:choose|complete|finish|enter)|incomplete))(?=.*(?:payment[ _-]?(?:method|selection|page)|method[ _-]?select))/i, code: 'abandoned_at_payment', confidence: CONFIDENCE_STRONG_PHRASE },
+  { pattern: /(?=.*(?:abandon|funnel[ _-]?exit|drop[ _-]?off|dropped|left|exit|session[ _-]?(?:end|ended|expired)|did not (?:choose|complete|finish|enter)|incomplete))(?=.*(?:address|shipping|delivery|pincode))/i, code: 'abandoned_at_address', confidence: CONFIDENCE_STRONG_PHRASE },
+  { pattern: /(?=.*(?:abandon|funnel[ _-]?exit|drop[ _-]?off|dropped|left|exit|session[ _-]?(?:end|ended|expired)|did not (?:choose|complete|finish|enter)|incomplete))(?=.*(?:cart|basket|bag))/i, code: 'abandoned_at_cart', confidence: CONFIDENCE_STRONG_PHRASE },
+
   // ---- ISO 8583 response codes, as standalone tokens ----------------------
   // Anchored on word boundaries so an amount or a reference number containing "51"
   // cannot be read as a decline code.
@@ -87,11 +133,40 @@ const RULES: readonly Rule[] = [
   // ---- transport, last: the weakest and most ambiguous signal -------------
   { pattern: /gateway timeout|etimedout|connection reset|\b504\b|timed out|timeout/i, code: 'network_timeout', confidence: CONFIDENCE_WEAK_KEYWORD },
 
+  // ---- receivables silence, dead last -------------------------------------
+  // The broadest pattern in the file, so it goes after every payments rule. Placed among the
+  // receivables block originally, where it read "bank server not responding" as a buyer who
+  // would not reply and filed an issuer outage as a collections problem.
+  { pattern: /no[ _-]?(?:response|reply|contact)|unreachable|not responding|chased.*no reply/i, code: 'no_response', confidence: CONFIDENCE_WEAK_KEYWORD },
+
   // ---- a bare "declined" says only that it failed -------------------------
   // Deliberately NOT mapped. It is the most tempting rule in the file and the most
   // harmful: it would convert every opaque string into a confident `do_not_honour`,
   // spending money on a cause nobody identified. Absence of a rule here is the rule.
 ];
+
+/**
+ * WHERE THIS TABLE FAILS ON PLAIN ENGLISH, measured rather than asserted.
+ *
+ * Three strings in the easy tier defeat it, and all three are worth keeping:
+ *
+ *   "customer did not complete OTP verification"          → read as an abandoned checkout
+ *   "customer reached authentication and did not complete it" → read as a 3DS timeout
+ *
+ * A symmetric confusion between the same two causes, from the same words. Nothing in either
+ * sentence says whether a charge was presented, and that is the entire difference: an OTP
+ * failure during an authorisation needs a different rail, while an OTP exit during checkout
+ * needs a fresh link. A rule table cannot tell them apart, and it is wrong in BOTH directions
+ * — which costs money twice, since each cause's correct intervention is useless for the
+ * other. Disambiguating it requires knowing what a charge is, not which words appeared.
+ *
+ *   "customer says the quantity on the invoice is wrong"  → unrecognised
+ *
+ * A dispute, stated without any of the vocabulary of disputes. Reachable only by adding a
+ * rule for "quantity ... wrong", which is reading the corpus rather than knowing the domain.
+ * Left failing on purpose: the honest ceiling of a keyword table is what the ablation is
+ * measuring, and engineering this away would delete the measurement.
+ */
 
 export function classifyByKeyword(input: ClassificationInput): {
   readonly code: ReasonCode;

@@ -34,10 +34,27 @@ if (!DATABASE_UP) {
  * So this asserts parity on the two quantities that cannot drift without the simulations
  * having diverged: how many attempts fired, and how many recovered. Both are exact.
  *
- * Net value is NOT asserted equal, and the gap is fully accounted for: the sweep excludes
- * customer messaging, because the truth model has no notion of a customer responding to a
- * nudge and including it would add cost and no recovery to every arm alike. The test bounds
- * that difference instead, so an unexplained divergence still fails.
+ * WHAT MAKING THAT EXACT COST, because it was not free and the debugging is the interesting
+ * part. The sweep used to hand every arm a universal registered template and `opt_in`
+ * consent, on the grounds that messaging was excluded from it anyway. Once four of the five
+ * risk classes recovered money by messaging, that shortcut meant the sweep was measuring the
+ * robustness of a system in which nobody had opted out and every template existed. Three
+ * things had to become genuinely shared rather than approximately similar:
+ *
+ *   The POPULATION. Consent, language and the NCPR flag moved into `planTxns`, so both paths
+ *   read one book of customers instead of drawing their own.
+ *
+ *   The TEMPLATE RESOLUTION. The sweep resolves the step's template and language variant from
+ *   the same seed list the database is seeded from, so it cannot send what the run cannot.
+ *
+ *   The ORDER. Contact ceilings are per customer, so processing order decides which sends are
+ *   permitted. The runner tied on the primary key — a hash, unreproducible in memory — and
+ *   the two paths disagreed by exactly one attempt in two hundred. Both now tie on the
+ *   generation index.
+ *
+ * Net value is NOT asserted equal, and the difference is exact and deliberate rather than
+ * bounded: a recovered subscription is scored on the horizon basis in the sweep and on the
+ * cash basis in the report. See below.
  */
 
 let db: Db;
@@ -94,7 +111,7 @@ describe.skipIf(!DATABASE_UP)('in-memory sweep vs the database runner', () => {
     expect(inMemory.recovered).toBe(persisted.succeeded);
   });
 
-  it('agrees on net value once messaging is accounted for', async () => {
+  it('differs on net value by exactly the subscription horizon, and nothing else', async () => {
     const policy = loadPolicy();
     const priors = loadPriorTable();
 
@@ -114,10 +131,22 @@ describe.skipIf(!DATABASE_UP)('in-memory sweep vs the database runner', () => {
       arm: armById('rc'),
     });
 
-    // The sweep omits message cost, so it should sit exactly that much ABOVE the persisted
-    // net. Asserting the direction and the magnitude turns "the numbers are close" into a
-    // statement that would fail if anything else had drifted.
+    // ONE accounted-for difference, asserted exactly.
+    //
+    // The sweep scores a recovered subscription cycle at `margin x remaining cycles` — the
+    // same basis the expected-value gate priced the decision on, because scoring a decision
+    // on one basis and its outcome on another makes every subscription action look like a
+    // loss by construction. The report scores CASH: margin on money that has actually moved,
+    // with the horizon reported beside it as its own clearly-labelled line.
+    //
+    // Both are defensible and they answer different questions. What matters here is that the
+    // gap between them is *entirely* that choice, so this is an equality rather than a bound:
+    // any other drift — a cost the sweep forgot to charge, a message the run suppressed and
+    // the sweep sent — breaks it.
     const difference = inMemory.net - metrics.net;
-    expect(difference).toBe(metrics.messageCosts);
+    expect(difference).toBe(metrics.lifetimeValuePreserved);
+
+    // And the horizon really is in play, so the assertion above is not passing on two zeroes.
+    expect(metrics.lifetimeValuePreserved).toBeGreaterThan(0n);
   });
 });

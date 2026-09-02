@@ -190,6 +190,12 @@ async function seedOne(label: string): Promise<TxnContext> {
     marginBps: bps(1900),
     rail: 'card',
     logicalRef: `0:${label}`,
+    // A one-off card payment: the class with no extra mechanics, so this test stays about
+    // crash recovery rather than about e-mandate notice periods.
+    riskClass: 'payment_failure',
+    lifetimeCycles: null,
+    daysOverdue: null,
+    mandateBacked: false,
   };
 }
 
@@ -206,19 +212,30 @@ async function attemptOnce(
     reasonCode: 'insufficient_funds',
   });
 
+  // Everything the planner needs comes from the loaded context rather than being restated
+  // here. That matters for a crash-resume test specifically: a hand-written fixture that
+  // drifts from what the repository actually reads would make the reconciliation path
+  // resume against a transaction the database does not contain.
   const plan = planNext({
     now: AT,
     policy,
     priors,
     reasonCode: 'insufficient_funds',
+    riskClass: context.txn.riskClass,
     amount: txn.amount,
     marginBps: txn.marginBps,
+    lifetimeCycles: context.txn.lifetimeCycles,
     currentRail: txn.rail,
     attemptNo: context.attemptNo,
     hoursSinceLastAttempt: context.hoursSinceLastAttempt,
     contactsThisWeek: context.contactsThisWeek,
+    callsThisWeek: context.callsThisWeek,
     consent: context.consent,
     template: context.template,
+    onNcprRegistry: context.onNcprRegistry,
+    mandateBacked: context.txn.mandateBacked,
+    hoursSincePreDebitNotice: context.hoursSincePreDebitNotice,
+    openPromiseDueAt: context.openPromiseDueAt,
     batchFeeRemaining: context.batchFeeRemaining,
   });
 

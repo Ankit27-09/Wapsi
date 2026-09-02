@@ -1,6 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import fc from 'fast-check';
-import { CHANNELS, REASON_CODES, mayEverContact, paise, type Channel, type ReasonCode } from '@rc/core';
+import {
+  CHANNELS,
+  REASON_CODES,
+  RISK_CLASSES,
+  RISK_CLASS_META,
+  causeIsValidFor,
+  incursGatewayFee,
+  mayEverContact,
+  paise,
+  type Channel,
+  type Intervention,
+  type ReasonCode,
+  type RiskClass,
+} from '@rc/core';
 import { checkAttemptBounds, checkContactBounds, type ConsentState } from './bounds.js';
 import { buildPolicy, loadPolicy, type Policy } from './policy.js';
 
@@ -46,16 +59,51 @@ function attemptInput(overrides: {
   readonly policy?: Policy;
   readonly feeRemaining?: bigint;
   readonly fee?: bigint;
+  readonly riskClass?: RiskClass;
+  readonly intervention?: Intervention;
+  readonly mandateBacked?: boolean;
+  readonly hoursSincePreDebitNotice?: number | null;
+  readonly openPromiseDueAt?: Date | null;
 }) {
   return {
     now: MIDDAY_IST,
     policy: overrides.policy ?? policy,
     reasonCode: overrides.reasonCode,
+    // A one-off card retry unless a test says otherwise: the class with no special
+    // mechanics, so a test about attempt caps is not also a test about e-mandate notices.
+    riskClass: overrides.riskClass ?? classFor(overrides.reasonCode),
+    intervention:
+      overrides.intervention ??
+      interventionFor(overrides.riskClass ?? classFor(overrides.reasonCode)),
     attemptNo: overrides.attemptNo,
     hoursSinceLastAttempt: overrides.hoursSinceLastAttempt ?? null,
     batchFeeRemaining: paise(overrides.feeRemaining ?? 500_000n),
     gatewayFee: paise(overrides.fee ?? 350n),
+    mandateBacked: overrides.mandateBacked ?? false,
+    hoursSincePreDebitNotice: overrides.hoursSincePreDebitNotice ?? null,
+    openPromiseDueAt: overrides.openPromiseDueAt ?? null,
   };
+}
+
+/**
+ * The risk class a cause belongs to, and the intervention that class actually permits.
+ *
+ * Property tests range over every reason code, and a cause only means something inside a
+ * class. Pairing `abandoned_at_otp` with `payment_failure` describes a transaction that
+ * cannot exist, and the bounds would refuse it on legality rather than on the rule under
+ * test — so every such test would pass for the wrong reason.
+ */
+function classFor(code: ReasonCode): RiskClass {
+  for (const riskClass of RISK_CLASSES) {
+    if (riskClass === 'payment_failure') continue;
+    if (causeIsValidFor(riskClass, code)) return riskClass;
+  }
+  return 'payment_failure';
+}
+
+/** An intervention the class permits, so legality never masks the rule being tested. */
+function interventionFor(riskClass: RiskClass): Intervention {
+  return RISK_CLASS_META[riskClass].interventions.includes('retry') ? 'retry' : 'notify';
 }
 
 function contactInput(overrides: {
@@ -63,9 +111,12 @@ function contactInput(overrides: {
   readonly channel: Channel;
   readonly consent?: ConsentState;
   readonly contactsThisWeek?: number;
+  readonly callsThisWeek?: number;
   readonly now?: Date;
   readonly policy?: Policy;
   readonly hasRegisteredTemplate?: boolean;
+  readonly onNcprRegistry?: boolean;
+  readonly mandatoryNotice?: boolean;
 }) {
   return {
     now: overrides.now ?? MIDDAY_IST,
@@ -74,7 +125,12 @@ function contactInput(overrides: {
     channel: overrides.channel,
     consent: overrides.consent ?? 'opt_in',
     contactsThisWeek: overrides.contactsThisWeek ?? 0,
+    callsThisWeek: overrides.callsThisWeek ?? 0,
     hasRegisteredTemplate: overrides.hasRegisteredTemplate ?? true,
+    onNcprRegistry: overrides.onNcprRegistry ?? false,
+    // Defaults to false, so the "a nudge here is noise" rule stays under test. A test that
+    // wants the mandatory-notice override has to ask for it.
+    mandatoryNotice: overrides.mandatoryNotice ?? false,
   };
 }
 
@@ -111,8 +167,13 @@ describe('attempt caps hold', () => {
   it('permits every attempt inside the schedule and none beyond it', () => {
     fc.assert(
       fc.property(anyReasonCode, fc.integer({ min: 1, max: 8 }), (reasonCode, attemptNo) => {
-        const cap = policy.attemptCap(reasonCode);
-        const verdict = checkAttemptBounds(attemptInput({ reasonCode, attemptNo }));
+        // Read WITH the risk class, because the schedule is per (class, cause) now. Reading
+        // the base cap and testing against a class override compares the verdict to a
+        // schedule that was never consulted, and the test passes or fails on the mismatch
+        // rather than on the rule.
+        const riskClass = classFor(reasonCode);
+        const cap = policy.attemptCap(reasonCode, riskClass);
+        const verdict = checkAttemptBounds(attemptInput({ reasonCode, riskClass, attemptNo }));
 
         if (cap === 0) {
           // Terminal: not a low probability, a structural zero. Must never spend a fee.
@@ -132,12 +193,34 @@ describe('attempt caps hold', () => {
   });
 
   it('never permits an attempt on a code whose schedule is empty', () => {
-    const terminal = REASON_CODES.filter((code) => policy.attemptCap(code) === 0);
-    // Guards against the schedule quietly gaining an entry for a code where success is
-    // impossible — the config change that would look harmless in review.
-    expect(terminal).toEqual(
-      expect.arrayContaining(['card_expired', 'mandate_expired', 'suspected_fraud_block', 'unknown']),
+    const empty = REASON_CODES.filter((code) => policy.attemptCap(code) === 0);
+
+    // Guards against the schedule quietly gaining an entry for a code where NO ACTION AT
+    // ALL can succeed — the config change that would look harmless in review.
+    //
+    // `card_expired` and `mandate_expired` used to be on this list and deliberately are not
+    // any more. Both are still structural zeros for a CHARGE, enforced in the prior table;
+    // what changed is that asking the customer for a new instrument or a fresh authorisation
+    // is a different action with a real success rate, and refusing to schedule it was
+    // writing off collectable revenue. `disputed_line_item` joins the list for the opposite
+    // reason: automated contact over a contested invoice makes the outcome worse.
+    expect(empty).toEqual(
+      expect.arrayContaining(['suspected_fraud_block', 'unknown', 'disputed_line_item']),
     );
+
+    // And the two that moved off the list did so by gaining a NON-CHARGING schedule, not by
+    // gaining permission to retry. That is the invariant worth pinning: it would still fail
+    // if someone "fixed" an expired card by adding a retry step.
+    const noChargeSchedules: readonly [ReasonCode, RiskClass][] = [
+      ['card_expired', 'subscription_failure'],
+      ['mandate_expired', 'mandate_lapsed'],
+    ];
+
+    for (const [code, riskClass] of noChargeSchedules) {
+      const { schedule } = policy.forReason(code, riskClass);
+      expect(schedule.length).toBeGreaterThan(0);
+      for (const step of schedule) expect(incursGatewayFee(step.action)).toBe(false);
+    }
   });
 });
 
@@ -145,12 +228,13 @@ describe('minimum gap between attempts', () => {
   it('blocks a retry that arrives sooner than the code requires', () => {
     fc.assert(
       fc.property(anyReasonCode, fc.integer({ min: 0, max: 200 }), (reasonCode, hours) => {
-        const cap = policy.attemptCap(reasonCode);
+        const riskClass = classFor(reasonCode);
+        const cap = policy.attemptCap(reasonCode, riskClass);
         if (cap < 2) return; // no second attempt to gap
 
-        const minGap = policy.forReason(reasonCode).min_gap_hours;
+        const minGap = policy.forReason(reasonCode, riskClass).min_gap_hours;
         const verdict = checkAttemptBounds(
-          attemptInput({ reasonCode, attemptNo: 2, hoursSinceLastAttempt: hours }),
+          attemptInput({ reasonCode, riskClass, attemptNo: 2, hoursSinceLastAttempt: hours }),
         );
 
         if (minGap > 0 && hours < minGap) {
@@ -166,9 +250,10 @@ describe('minimum gap between attempts', () => {
   it('does not apply a gap to the first attempt', () => {
     fc.assert(
       fc.property(anyReasonCode, (reasonCode) => {
-        if (policy.attemptCap(reasonCode) === 0) return;
+        const riskClass = classFor(reasonCode);
+        if (policy.attemptCap(reasonCode, riskClass) === 0) return;
         const verdict = checkAttemptBounds(
-          attemptInput({ reasonCode, attemptNo: 1, hoursSinceLastAttempt: null }),
+          attemptInput({ reasonCode, riskClass, attemptNo: 1, hoursSinceLastAttempt: null }),
         );
         expect(verdict.kind).toBe('allow');
       }),

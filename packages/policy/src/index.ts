@@ -13,15 +13,19 @@
  */
 
 export {
+  type PriorKind,
   type PriorLookup,
   type PriorRow,
   type PriorTable,
   type Source,
   type Timing,
+  PRIOR_KINDS,
+  PriorKindSchema,
   TIMINGS,
   TimingSchema,
   buildPriorTable,
   loadPriorTable,
+  priorKindFor,
 } from './priors.js';
 
 export {

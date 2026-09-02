@@ -1,4 +1,11 @@
-import { bps, deterministicId, type Rail, type ReasonCode } from '@rc/core';
+import {
+  bps,
+  causeIsValidFor,
+  deterministicId,
+  type Rail,
+  type ReasonCode,
+  type RiskClass,
+} from '@rc/core';
 import type { Arm, Db } from '@rc/db';
 import { deriveRng, type Rng } from './rng.js';
 import { FAILURE_STRINGS, INJECTION_STRINGS, NOVEL_STRINGS } from './strings.js';
@@ -45,29 +52,127 @@ const GENERATION_SPAN_DAYS = 7;
  * numbers and converting to `bigint` at the boundary is exact.
  */
 const AMOUNT_TIERS = [
-  { weight: 45, minPaise: 9_900, maxPaise: 99_900, marginBps: 2600 },
-  { weight: 35, minPaise: 100_000, maxPaise: 999_900, marginBps: 1900 },
-  { weight: 15, minPaise: 1_000_000, maxPaise: 9_999_900, marginBps: 1200 },
-  { weight: 5, minPaise: 10_000_000, maxPaise: 50_000_000, marginBps: 800 },
+  { minPaise: 9_900, maxPaise: 99_900, marginBps: 2600 },
+  { minPaise: 100_000, maxPaise: 999_900, marginBps: 1900 },
+  { minPaise: 1_000_000, maxPaise: 9_999_900, marginBps: 1200 },
+  { minPaise: 10_000_000, maxPaise: 50_000_000, marginBps: 800 },
 ] as const;
 
 /**
- * Reason code mix.
+ * Which amount tiers each risk class draws from.
  *
- * `do_not_honour` is weighted heavily on purpose: it is the most common card decline in
- * the world, and a batch that under-represents it would make recovery look far more
- * tractable than it is. Weights sum to 100 for readability.
+ * Not one shared distribution, because the classes genuinely differ in size and the
+ * difference is what the expected-value gate exists to act on. A B2B invoice is two orders
+ * of magnitude larger than a subscription cycle and carries a third of the margin, so a
+ * single blended tier mix would hide the trade-off the whole system is built around: an
+ * eighteen-paise nudge is trivially worth sending on a ₹4 lakh receivable and genuinely
+ * marginal on a ₹499 abandoned cart.
+ *
+ * Weights are per tier, in the order above, and need not sum to anything.
  */
-const REASON_MIX: readonly { readonly item: ReasonCode; readonly weight: number }[] = [
-  { item: 'insufficient_funds', weight: 31 },
-  { item: 'do_not_honour', weight: 22 },
-  { item: 'threeds_timeout', weight: 14 },
-  { item: 'mandate_expired', weight: 9 },
-  { item: 'issuer_down', weight: 8 },
-  { item: 'card_expired', weight: 7 },
-  { item: 'network_timeout', weight: 6 },
-  { item: 'suspected_fraud_block', weight: 3 },
+const AMOUNT_TIER_WEIGHTS: Readonly<Record<RiskClass, readonly [number, number, number, number]>> =
+  {
+    payment_failure: [45, 35, 15, 5],
+    // Subscription cycles are small and recur. The value comes from the horizon, not the
+    // ticket, which is exactly the case a per-transaction gate gets wrong without
+    // `lifetime_cycles`.
+    subscription_failure: [70, 28, 2, 0],
+    mandate_lapsed: [65, 32, 3, 0],
+    // Carts skew small, with a tail of considered purchases.
+    checkout_abandonment: [55, 33, 11, 1],
+    // B2B invoices. Low margin, large amounts, and the class where a single well-timed
+    // message recovers more rupees than anything else in the system.
+    receivable_overdue: [2, 18, 50, 30],
+  };
+
+/**
+ * Risk class mix.
+ *
+ * Payment failures remain the plurality because that is what a payment gateway sees most of,
+ * but the other four are weighted heavily enough to be measured rather than merely present.
+ * A batch with three abandoned checkouts in it would let a checkout strategy look however
+ * the noise happened to fall.
+ */
+const RISK_CLASS_MIX: readonly { readonly item: RiskClass; readonly weight: number }[] = [
+  { item: 'payment_failure', weight: 38 },
+  { item: 'subscription_failure', weight: 19 },
+  { item: 'checkout_abandonment', weight: 20 },
+  { item: 'receivable_overdue', weight: 16 },
+  { item: 'mandate_lapsed', weight: 7 },
 ];
+
+/**
+ * Cause mix WITHIN each risk class.
+ *
+ * Nested rather than flat, and that is the structural point: a cause is only meaningful
+ * inside a class. An invoice cannot decline for insufficient funds and a cart cannot have an
+ * expired card, so a single flat mix would generate transactions that cannot exist — and any
+ * strategy evaluated against them would be evaluated against fiction.
+ *
+ * `RISK_CLASS_META` is the authority on which pairs are legal, and `causeIsValidFor` asserts
+ * every entry below against it at generation time.
+ *
+ * `do_not_honour` is weighted heavily inside the payment classes on purpose: it is the most
+ * common card decline in the world, and a batch that under-represents it would make recovery
+ * look far more tractable than it is.
+ */
+const CAUSE_MIX: Readonly<
+  Record<RiskClass, readonly { readonly item: ReasonCode; readonly weight: number }[]>
+> = {
+  payment_failure: [
+    { item: 'insufficient_funds', weight: 30 },
+    { item: 'do_not_honour', weight: 26 },
+    { item: 'threeds_timeout', weight: 19 },
+    { item: 'issuer_down', weight: 9 },
+    { item: 'card_expired', weight: 8 },
+    { item: 'network_timeout', weight: 5 },
+    { item: 'suspected_fraud_block', weight: 3 },
+  ],
+  subscription_failure: [
+    { item: 'insufficient_funds', weight: 44 },
+    { item: 'do_not_honour', weight: 22 },
+    { item: 'card_expired', weight: 18 },
+    { item: 'issuer_down', weight: 10 },
+    { item: 'network_timeout', weight: 6 },
+  ],
+  mandate_lapsed: [{ item: 'mandate_expired', weight: 100 }],
+  checkout_abandonment: [
+    // Monotonically falling with funnel depth, which is what a real funnel does — and the
+    // reason the four stages are separate causes is that their recovery rates differ by more
+    // than 5x, so the shape of this mix matters as much as its levels.
+    { item: 'abandoned_at_cart', weight: 42 },
+    { item: 'abandoned_at_address', weight: 24 },
+    { item: 'abandoned_at_payment', weight: 20 },
+    { item: 'abandoned_at_otp', weight: 14 },
+  ],
+  receivable_overdue: [
+    { item: 'payment_run_cycle', weight: 30 },
+    { item: 'awaiting_approval', weight: 26 },
+    { item: 'no_response', weight: 24 },
+    { item: 'promised_not_paid', weight: 12 },
+    { item: 'disputed_line_item', weight: 8 },
+  ],
+};
+
+/**
+ * How overdue an invoice is, by cause, in days.
+ *
+ * Cause and age are not independent, and pretending they were would break the one thing this
+ * class turns on. An invoice sitting behind a monthly payment run is a few weeks late by
+ * definition; one that has had no reply for four months is a different problem with a
+ * different answer, and generating both from one distribution would make the age column
+ * uninformative.
+ */
+const DAYS_OVERDUE_BY_CAUSE: Readonly<Record<string, readonly [number, number]>> = {
+  payment_run_cycle: [4, 34],
+  awaiting_approval: [7, 45],
+  no_response: [30, 140],
+  promised_not_paid: [21, 90],
+  disputed_line_item: [14, 120],
+};
+
+/** Remaining billing cycles on a failed subscription. */
+const LIFETIME_CYCLES_RANGE: readonly [number, number] = [2, 24];
 
 const RAIL_MIX: readonly { readonly item: Rail; readonly weight: number }[] = [
   { item: 'card', weight: 45 },
@@ -81,8 +186,6 @@ const RAIL_MIX: readonly { readonly item: Rail; readonly weight: number }[] = [
 const NOVEL_SHARE = bps(1200);
 /** Share rendered with a string that tries to steer the classifier. */
 const INJECTION_SHARE = bps(300);
-/** Share recurring, outside the codes that force it. */
-const RECURRING_SHARE = bps(3000);
 
 /**
  * Consent, as an Indian merchant's book actually looks.
@@ -97,6 +200,28 @@ const CONSENT_OPT_OUT_SHARE = bps(1500);
 
 /** Share of customers who should receive Hinglish rather than English templates. */
 const HINGLISH_SHARE = bps(4000);
+
+/**
+ * Share of customers registered on the NCPR / DND list.
+ *
+ * Real and large. Modelling it as a rounding error would make the voice channel look far
+ * more available than it is, and the whole reason voice is worth building carefully is that
+ * it is expensive AND frequently unlawful — a combination that only an expected-value gate
+ * with a hard compliance bound in front of it handles correctly.
+ */
+const NCPR_SHARE = bps(2500);
+
+/** Share of customers who have opted in to receiving CALLS, which is far fewer than SMS. */
+const VOICE_OPT_IN_SHARE = bps(4500);
+
+/**
+ * Share of silent receivables where the buyer has made a promise that is still open.
+ *
+ * Exists so the suppression path is measured rather than merely implemented: without an open
+ * promise in the population, `promise_open` never fires and the claim that the system stops
+ * chasing customers who have committed is untested.
+ */
+const OPEN_PROMISE_SHARE = bps(2500);
 
 /**
  * Default per-transaction fee budget. The policy's own ceiling applies on top.
@@ -135,6 +260,8 @@ export interface GeneratedBatch {
   readonly novelStrings: number;
   readonly injectionStrings: number;
   readonly byReasonCode: Readonly<Record<string, number>>;
+  readonly byRiskClass: Readonly<Record<string, number>>;
+  readonly promises: number;
 }
 
 /** How a reason string was rendered. Read by the ablation, never by the policy. */
@@ -159,6 +286,23 @@ export interface PlannedTxn {
   readonly description: string;
   readonly rendering: Rendering;
   readonly failedAt: Date;
+  readonly riskClass: RiskClass;
+  /** Non-null exactly for `subscription_failure`. */
+  readonly lifetimeCycles: number | null;
+  /** Non-null exactly for `receivable_overdue`. */
+  readonly daysOverdue: number | null;
+  /**
+   * A promise-to-pay, when the buyer has made one.
+   *
+   * `open` suppresses the ladder until its date; `broken` is what `promised_not_paid` means.
+   * Both are generated because both are needed to demonstrate the mechanism — an
+   * implementation with no open promise in its test population has not shown that it stops.
+   */
+  readonly promise: {
+    readonly promisedFor: Date;
+    readonly status: 'open' | 'broken';
+    readonly obtainedVia: 'sms_reply' | 'voice_call' | 'payment_page' | 'agent_note';
+  } | null;
 }
 
 /**
@@ -176,6 +320,20 @@ function railFor(code: ReasonCode, rng: Rng): Rail {
       return 'card';
     case 'mandate_expired':
       return 'upi_collect';
+
+    // Checkout abandonment and overdue receivables never reached a rail — nothing was ever
+    // presented for authorisation. The column still needs a value, and the rail a customer
+    // *would* have used is the useful one to record: it is what a recovery link would offer
+    // them, and what the fee model would price if they took it.
+    case 'abandoned_at_cart':
+    case 'abandoned_at_address':
+    case 'abandoned_at_payment':
+    case 'abandoned_at_otp':
+    case 'awaiting_approval':
+    case 'disputed_line_item':
+    case 'payment_run_cycle':
+    case 'no_response':
+    case 'promised_not_paid':
     case 'insufficient_funds':
     case 'do_not_honour':
     case 'issuer_down':
@@ -193,8 +351,31 @@ function railFor(code: ReasonCode, rng: Rng): Rail {
  * function rather than reimplementing it is the point — a sweep run against a differently
  * generated population would be measuring a different question.
  */
+/**
+ * One synthetic customer, before they touch the database.
+ *
+ * MOVED HERE FROM `generateBatch`, and the move is a correctness fix rather than tidying.
+ * Consent, language and the NCPR flag used to be drawn inside the persistence function, so
+ * the in-memory sweep had no access to them — it therefore gave every customer consent and a
+ * universal template, and measured a system in which nobody had opted out.
+ *
+ * That made the sensitivity analysis a confident statement about the robustness of a
+ * different, more permissive system than the one that ships. The whole point of the sweep is
+ * that it replays THIS system, so the population has to be one population.
+ */
+export interface PlannedCustomer {
+  readonly issuerId: string;
+  readonly language: 'en' | 'hi_latn';
+  /** Null means the customer never expressed a preference — which is not consent. */
+  readonly smsConsent: 'opt_in' | 'opt_out' | null;
+  readonly voiceOptIn: boolean;
+  readonly onNcprRegistry: boolean;
+}
+
 export function planTxns(seed: number, count: number): {
   readonly txns: readonly PlannedTxn[];
+  readonly customers: readonly PlannedCustomer[];
+  /** Issuer ids alone, kept for the many call sites that only need those. */
   readonly customerIssuers: readonly string[];
 } {
   // Independent streams per concern. Without this, adding one draw to the string chooser
@@ -205,6 +386,10 @@ export function planTxns(seed: number, count: number): {
   const rngCauses = deriveRng(seed, 'causes');
   const rngStrings = deriveRng(seed, 'strings');
   const rngTiming = deriveRng(seed, 'timing');
+  // Its own stream, so adding risk classes did not reshuffle every amount, cause and string
+  // already generated — the property that lets one change be evaluated in isolation.
+  const rngClasses = deriveRng(seed, 'risk_classes');
+  const rngPromises = deriveRng(seed, 'promises');
 
   const truth = loadTruthModel();
 
@@ -214,16 +399,88 @@ export function planTxns(seed: number, count: number): {
     () => truth.pickIssuer(rngPopulation).id,
   );
 
+  // Independent streams, drawn in a fixed order, so `generateBatch` and the sweep produce
+  // the identical population — and so adding one of these later cannot reshuffle the others.
+  const rngLanguage = deriveRng(seed, 'language');
+  const rngConsent = deriveRng(seed, 'consent');
+  const rngRegistry = deriveRng(seed, 'ncpr');
+
+  const customers: PlannedCustomer[] = customerIssuers.map((issuerId) => {
+    const language = rngLanguage.chance(HINGLISH_SHARE) ? ('hi_latn' as const) : ('en' as const);
+
+    // One draw, three outcomes, so the shares are exact rather than approximately
+    // independent. Customers with no row at all are the interesting population: `unknown`
+    // is not `opt_in`, so they are unmessageable, and seeding a book where everyone had
+    // consented would make the consent bound untestable and the compliance layer decorative.
+    const roll = rngConsent.nextInt(1, 10_000);
+    const smsConsent =
+      roll <= CONSENT_OPT_IN_SHARE
+        ? ('opt_in' as const)
+        : roll <= CONSENT_OPT_IN_SHARE + CONSENT_OPT_OUT_SHARE
+          ? ('opt_out' as const)
+          : null;
+
+    // Drawn separately and materially rarer than SMS consent, which is true of every
+    // merchant's book: people accept transactional messages and decline calls.
+    const voiceOptIn = rngConsent.chance(VOICE_OPT_IN_SHARE);
+
+    return {
+      issuerId,
+      language,
+      smsConsent,
+      voiceOptIn,
+      onNcprRegistry: rngRegistry.chance(NCPR_SHARE),
+    };
+  });
+
   const txns: PlannedTxn[] = [];
 
   for (let i = 0; i < count; i += 1) {
-    const tier = rngAmounts.weighted(AMOUNT_TIERS.map((t) => ({ item: t, weight: t.weight })));
+    // CLASS FIRST, THEN CAUSE. The class determines which causes are even possible, so
+    // drawing the cause first and then trying to find a class for it would produce
+    // transactions that cannot exist — an invoice declining for insufficient funds.
+    const riskClass = rngClasses.weighted(RISK_CLASS_MIX);
+
+    const tierWeights = AMOUNT_TIER_WEIGHTS[riskClass];
+    const tier = rngAmounts.weighted(
+      AMOUNT_TIERS.map((t, index) => ({ item: t, weight: tierWeights[index] ?? 0 })),
+    );
     const amountPaise = rngAmounts.nextInt(tier.minPaise, tier.maxPaise);
 
-    const trueCode = rngCauses.weighted(REASON_MIX);
+    const trueCode = rngCauses.weighted(CAUSE_MIX[riskClass]);
+    if (!causeIsValidFor(riskClass, trueCode)) {
+      // Unreachable while CAUSE_MIX matches RISK_CLASS_META, which is the point of checking:
+      // the two are separate declarations, and a drift between them would otherwise surface
+      // as a class silently receiving a cause whose interventions it does not permit.
+      throw new Error(`Generated ${trueCode} for ${riskClass}, which cannot have that cause`);
+    }
+
     const rail = railFor(trueCode, rngCauses);
+
+    // RECURRENCE FOLLOWS ENTIRELY FROM THE CLASS, and used to be a 30% coin flip on top of
+    // `payment_failure` as well. That draw had to go, because it created a category that was
+    // neither one thing nor the other: a recurring transaction with a live mandate, whose
+    // class said "one-off payment" and whose strategy therefore had no pre-debit notice step.
+    // Every retry on those was refused with `pre_debit_notice` — correctly, since debiting a
+    // mandate without notice is unlawful, and unrecoverably, since the policy for a one-off
+    // never schedules one.
+    //
+    // The honest model is that a recurring card-on-file payment failing IS a subscription
+    // failure. Making recurrence a property of the class rather than an independent draw
+    // removes the contradiction instead of adding a special case to work around it.
     const isRecurring =
-      trueCode === 'mandate_expired' ? true : rngCauses.chance(RECURRING_SHARE);
+      riskClass === 'subscription_failure' || riskClass === 'mandate_lapsed';
+
+    const lifetimeCycles =
+      riskClass === 'subscription_failure'
+        ? rngClasses.nextInt(LIFETIME_CYCLES_RANGE[0], LIFETIME_CYCLES_RANGE[1])
+        : null;
+
+    const overdueRange = DAYS_OVERDUE_BY_CAUSE[trueCode];
+    const daysOverdue =
+      riskClass === 'receivable_overdue' && overdueRange !== undefined
+        ? rngClasses.nextInt(overdueRange[0], overdueRange[1])
+        : null;
 
     const rendered = renderDescription(trueCode, rngStrings);
 
@@ -239,11 +496,58 @@ export function planTxns(seed: number, count: number): {
       isRecurring,
       trueCode,
       failedAt,
+      riskClass,
+      lifetimeCycles,
+      daysOverdue,
+      promise: planPromise(trueCode, failedAt, rngPromises),
       ...rendered,
     });
   }
 
-  return { txns, customerIssuers };
+  return { txns, customers, customerIssuers };
+}
+
+/**
+ * Whether this transaction carries a promise-to-pay, and of what kind.
+ *
+ * Two distinct populations, because they exercise opposite behaviours:
+ *
+ *   BROKEN, on every `promised_not_paid` invoice. That code means precisely this, so
+ *   generating the code without the promise would leave the follow-up scheduled against a
+ *   date that does not exist.
+ *
+ *   OPEN, on a quarter of silent invoices. The suppression path — the system's claim that it
+ *   stops chasing a buyer who has committed to a date — is only a claim until a population
+ *   with open promises in it fires `promise_open`.
+ */
+function planPromise(
+  code: ReasonCode,
+  failedAt: Date,
+  rng: Rng,
+): PlannedTxn['promise'] {
+  if (code === 'promised_not_paid') {
+    // One to three days after the failure, so the `promise_followup` step lands after the
+    // date rather than before it.
+    const days = rng.nextInt(1, 3);
+    return {
+      promisedFor: new Date(failedAt.getTime() + days * 86_400_000),
+      status: 'broken',
+      obtainedVia: rng.chance(bps(5000)) ? 'sms_reply' : 'voice_call',
+    };
+  }
+
+  if (code === 'no_response' && rng.chance(OPEN_PROMISE_SHARE)) {
+    // Comfortably beyond the longest timing bucket (120h), so the promise is still open at
+    // every point the ladder would otherwise have acted.
+    const days = rng.nextInt(8, 14);
+    return {
+      promisedFor: new Date(failedAt.getTime() + days * 86_400_000),
+      status: 'open',
+      obtainedVia: rng.chance(bps(4000)) ? 'payment_page' : 'agent_note',
+    };
+  }
+
+  return null;
 }
 
 function renderDescription(
@@ -293,7 +597,7 @@ export async function generateBatch(db: Db, options: GenerateOptions): Promise<G
     throw new RangeError(`count must be a positive integer, got ${count}`);
   }
 
-  const { txns, customerIssuers } = planTxns(seed, count);
+  const { txns, customers, customerIssuers } = planTxns(seed, count);
 
   // Reference data the policy depends on. Idempotent, and seeded outside the batch
   // transaction because registered templates are shared across every world rather than
@@ -335,21 +639,17 @@ export async function generateBatch(db: Db, options: GenerateOptions): Promise<G
       deterministicId('customer', seed, arm, world, index),
     );
 
-    // Language and consent are drawn from their own streams, so adding either later cannot
-    // reshuffle the amounts or the causes already generated.
-    const rngLanguage = deriveRng(seed, 'language');
-    const rngConsent = deriveRng(seed, 'consent');
-
-    const languages = customerIds.map(() =>
-      rngLanguage.chance(HINGLISH_SHARE) ? ('hi_latn' as const) : ('en' as const),
-    );
-
+    // Written FROM the planned population rather than drawn again here. Two draws of the
+    // same fact are two facts that can disagree, and the sweep replays the planned one — so
+    // a second derivation would let the robustness check quietly measure a different book of
+    // customers from the one the persisted run uses.
     for (const part of chunk(
-      customerIssuers.map((issuerId, index) => ({
+      customers.map((customer, index) => ({
         id: customerIds[index],
-        external_ref: `${seed}:${arm}:${world}:${index}:${issuerId}`,
+        external_ref: `${seed}:${arm}:${world}:${index}:${customer.issuerId}`,
         display_name: `Synthetic Customer ${index + 1}`,
-        preferred_language: languages[index],
+        preferred_language: customer.language,
+        on_ncpr_registry: customer.onNcprRegistry,
       })),
       INSERT_CHUNK,
     )) {
@@ -359,26 +659,38 @@ export async function generateBatch(db: Db, options: GenerateOptions): Promise<G
     // Consent, as an append-only ledger. Customers with no row are `unknown`, which is not
     // `opt_in` — they are unmessageable, and that population needs to exist or the consent
     // bound is never exercised.
-    const consentRows = customerIds.flatMap((customerId) => {
-      const roll = rngConsent.nextInt(1, 10_000);
-      const state =
-        roll <= CONSENT_OPT_IN_SHARE
-          ? ('opt_in' as const)
-          : roll <= CONSENT_OPT_IN_SHARE + CONSENT_OPT_OUT_SHARE
-            ? ('opt_out' as const)
-            : null;
+    //
+    // Voice is a separate row and materially rarer, which together with the NCPR share makes
+    // calling unavailable for most of the population. That is the correct answer, and the
+    // reason an escalation ladder has to treat a call as a scarce resource rather than as a
+    // louder SMS.
+    const consentRows = customers.flatMap((customer, index) => {
+      const customerId = customerIds[index];
+      if (customerId === undefined) throw new Error('unreachable: customer index out of range');
 
-      if (state === null) return [];
+      const rows = [];
 
-      return [
-        {
+      if (customer.smsConsent !== null) {
+        rows.push({
           customer_id: customerId,
           channel: 'sms' as const,
-          state,
-          source: state === 'opt_in' ? 'checkout_optin' : 'sms_stop_reply',
+          state: customer.smsConsent,
+          source: customer.smsConsent === 'opt_in' ? 'checkout_optin' : 'sms_stop_reply',
           recorded_at: SIM_EPOCH,
-        },
-      ];
+        });
+      }
+
+      if (customer.voiceOptIn) {
+        rows.push({
+          customer_id: customerId,
+          channel: 'voice' as const,
+          state: 'opt_in' as const,
+          source: 'ivr_confirmation',
+          recorded_at: SIM_EPOCH,
+        });
+      }
+
+      return rows;
     });
 
     for (const part of chunk(consentRows, INSERT_CHUNK)) {
@@ -404,13 +716,59 @@ export async function generateBatch(db: Db, options: GenerateOptions): Promise<G
           is_recurring: planned.isRecurring,
           // The schema refuses a recurring transaction with no mandate reference, so the
           // two facts are always generated together.
-          mandate_ref: planned.isRecurring ? `UMN${seed}${planned.customerIndex}` : null,
+          //
+          // A LAPSED mandate is the exception, and it is not a technicality: the whole
+          // meaning of `mandate_lapsed` is that no live authorisation exists. Writing a
+          // reference for one would make `mandateBacked` true, and the engine would then
+          // require a pre-debit notice for a debit that can never happen.
+          mandate_ref:
+            planned.isRecurring && planned.riskClass !== 'mandate_lapsed'
+              ? `UMN${seed}${planned.customerIndex}`
+              : null,
           failed_at: planned.failedAt,
+          risk_class: planned.riskClass,
+          lifetime_cycles: planned.lifetimeCycles,
+          days_overdue: planned.daysOverdue,
         };
       }),
       INSERT_CHUNK,
     )) {
       await tx.insertInto('txn').values(part).execute();
+    }
+
+    // Promises to pay. Written after the transactions they reference, and only for the
+    // transactions that have one — a promise on a payment failure would be meaningless,
+    // since the whole construct belongs to a conversation with a buyer.
+    const promiseRows = txns.flatMap((planned, index) => {
+      if (planned.promise === null) return [];
+      const txnId = txnIds[index];
+      const customerId = customerIds[planned.customerIndex];
+      if (txnId === undefined || customerId === undefined) {
+        throw new Error('unreachable: index out of range while writing promises');
+      }
+      return [
+        {
+          customer_id: customerId,
+          txn_id: txnId,
+          promised_paise: String(planned.amountPaise),
+          promised_for: planned.promise.promisedFor,
+          obtained_via: planned.promise.obtainedVia,
+          // Obtained at the moment the invoice went overdue, which is when the chaser would
+          // first have made contact.
+          obtained_at: planned.failedAt,
+          status: planned.promise.status,
+          // A resolved promise must carry a resolution time; the CHECK enforces it, so a
+          // broken one is dated the day after it was due.
+          resolved_at:
+            planned.promise.status === 'open'
+              ? null
+              : new Date(planned.promise.promisedFor.getTime() + 86_400_000),
+        },
+      ];
+    });
+
+    for (const part of chunk(promiseRows, INSERT_CHUNK)) {
+      await tx.insertInto('promise').values(part).execute();
     }
 
     for (const part of chunk(
@@ -434,8 +792,10 @@ export async function generateBatch(db: Db, options: GenerateOptions): Promise<G
     }
 
     const byReasonCode: Record<string, number> = {};
+    const byRiskClass: Record<string, number> = {};
     for (const planned of txns) {
       byReasonCode[planned.trueCode] = (byReasonCode[planned.trueCode] ?? 0) + 1;
+      byRiskClass[planned.riskClass] = (byRiskClass[planned.riskClass] ?? 0) + 1;
     }
 
     return {
@@ -448,6 +808,8 @@ export async function generateBatch(db: Db, options: GenerateOptions): Promise<G
       novelStrings: txns.filter((t) => t.rendering === 'novel').length,
       injectionStrings: txns.filter((t) => t.rendering === 'injection').length,
       byReasonCode,
+      byRiskClass,
+      promises: promiseRows.length,
     };
   });
 }

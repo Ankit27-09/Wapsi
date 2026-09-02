@@ -9,6 +9,7 @@ import {
   type CustomerId,
   type Paise,
   type Rail,
+  type RiskClass,
   type TxnId,
 } from '@rc/core';
 import type { DbOrTx } from '@rc/db';
@@ -44,6 +45,19 @@ export interface TxnContext {
    * faces the same coin flips. Opaque to the engine, which never interprets it.
    */
   readonly logicalRef: string;
+  /** What kind of revenue is at risk. Selects the strategy and the value calculation. */
+  readonly riskClass: RiskClass;
+  /** Remaining billing cycles, for a subscription. Null for every other class. */
+  readonly lifetimeCycles: number | null;
+  /** Days past due, for a receivable. Null for every other class. */
+  readonly daysOverdue: number | null;
+  /**
+   * Whether a live e-mandate backs the debit.
+   *
+   * Derived from `mandate_ref` being present rather than from the risk class, because the
+   * two genuinely differ: a lapsed mandate has a risk class about mandates and no mandate.
+   */
+  readonly mandateBacked: boolean;
 }
 
 export async function loadTxnContext(db: DbOrTx, txnId: TxnId): Promise<TxnContext> {
@@ -57,6 +71,10 @@ export async function loadTxnContext(db: DbOrTx, txnId: TxnId): Promise<TxnConte
       'margin_bps',
       'rail',
       'logical_ref',
+      'risk_class',
+      'lifetime_cycles',
+      'days_overdue',
+      'mandate_ref',
     ])
     .where('id', '=', txnId)
     .executeTakeFirstOrThrow(() => new Error(`No transaction ${txnId}`));
@@ -69,6 +87,10 @@ export async function loadTxnContext(db: DbOrTx, txnId: TxnId): Promise<TxnConte
     marginBps: bps(row.margin_bps),
     rail: row.rail,
     logicalRef: row.logical_ref,
+    riskClass: row.risk_class,
+    lifetimeCycles: row.lifetime_cycles,
+    daysOverdue: row.days_overdue,
+    mandateBacked: row.mandate_ref !== null && row.risk_class !== 'mandate_lapsed',
   };
 }
 
@@ -100,22 +122,80 @@ export async function loadAttemptHistory(db: DbOrTx, txnId: TxnId): Promise<Atte
   };
 }
 
-/** Messages sent to this customer inside the rolling contact window. */
+/**
+ * Messages sent to this customer inside the rolling contact window.
+ *
+ * `channel` narrows it to one channel, which is how the voice ceiling is enforced: calls are
+ * counted separately and capped harder, because a second call in a week is not twice the
+ * recovery — it is a complaint.
+ */
 export async function countRecentContacts(
   db: DbOrTx,
   customer: CustomerId,
   now: Date,
+  channel?: Channel,
 ): Promise<number> {
   const since = new Date(now.getTime() - CONTACT_WINDOW_DAYS * 86_400_000);
 
-  const row = await db
+  let query = db
     .selectFrom('message_send')
     .select((eb) => eb.fn.countAll<string>().as('n'))
     .where('customer_id', '=', customer)
-    .where('sent_at', '>=', since)
-    .executeTakeFirstOrThrow();
+    .where('sent_at', '>=', since);
 
+  if (channel !== undefined) query = query.where('channel', '=', channel);
+
+  const row = await query.executeTakeFirstOrThrow();
   return Number.parseInt(row.n, 10);
+}
+
+/**
+ * When a pre-debit notification was last actually DELIVERED for this transaction.
+ *
+ * Read from `message_send`, not from the decision that planned it, and the distinction is
+ * the whole value of the check. A pre-debit notice suppressed by quiet hours or by a consent
+ * opt-out is a notice that never reached the customer — so the debit that would have
+ * followed it is unlawful, even though a `fire` decision exists for the notification step.
+ *
+ * The consequence is a cascade worth demonstrating: block the message, and the charge 24
+ * hours later refuses itself with `pre_debit_notice`.
+ */
+export async function loadPreDebitNoticeAt(db: DbOrTx, txnId: TxnId): Promise<Date | null> {
+  const row = await db
+    .selectFrom('message_send')
+    .innerJoin('decision', 'decision.id', 'message_send.decision_id')
+    .select('message_send.sent_at as sent_at')
+    .where('decision.txn_id', '=', txnId)
+    .where('decision.planned_action', '=', 'pre_debit_notify')
+    .where('decision.verdict', '=', 'fire')
+    .orderBy('message_send.sent_at', 'desc')
+    .executeTakeFirst();
+
+  return row?.sent_at ?? null;
+}
+
+/**
+ * The open promise-to-pay on this transaction, if there is one.
+ *
+ * At most one can exist — a partial unique index enforces it — because two would make "is
+ * action suppressed?" depend on which row was read first.
+ */
+export async function loadOpenPromise(
+  db: DbOrTx,
+  txnId: TxnId,
+): Promise<{ readonly promisedFor: Date; readonly promisedPaise: Paise } | null> {
+  const row = await db
+    .selectFrom('promise')
+    .select(['promised_for', 'promised_paise'])
+    .where('txn_id', '=', txnId)
+    .where('status', '=', 'open')
+    .executeTakeFirst();
+
+  if (row === undefined) return null;
+  return {
+    promisedFor: row.promised_for,
+    promisedPaise: PaiseSchema.parse(row.promised_paise),
+  };
 }
 
 /**
@@ -193,8 +273,12 @@ export interface PlanContext {
   readonly attemptNo: number;
   readonly hoursSinceLastAttempt: number | null;
   readonly contactsThisWeek: number;
+  readonly callsThisWeek: number;
   readonly consent: ConsentState;
   readonly template: TemplateRef | null;
+  readonly onNcprRegistry: boolean;
+  readonly hoursSincePreDebitNotice: number | null;
+  readonly openPromiseDueAt: Date | null;
   readonly batchFeeRemaining: Paise;
 }
 
@@ -218,14 +302,22 @@ export async function loadPlanContext(
 ): Promise<PlanContext> {
   const txn = await loadTxnContext(db, args.txnId);
   const history = await loadAttemptHistory(db, args.txnId);
+  const attemptNo = history.firedCount + 1;
 
   const customer = await db
     .selectFrom('customer')
-    .select('preferred_language')
+    .select(['preferred_language', 'on_ncpr_registry'])
     .where('id', '=', txn.customerId)
     .executeTakeFirstOrThrow(() => new Error(`No customer ${txn.customerId}`));
 
-  const templateId = args.policy.forReason(args.reasonCode).template;
+  // The STEP's template wins over the reason code's default, which is how an escalation
+  // ladder climbs channels: naming a voice template at step three is the entire mechanism,
+  // because the template carries its own channel. Falling back to the reason default keeps
+  // every unremarkable step's config to one line.
+  const step = args.policy.scheduleEntry(args.reasonCode, attemptNo, txn.riskClass);
+  const reason = args.policy.forReason(args.reasonCode, txn.riskClass);
+  const templateId = step?.template ?? reason.template;
+
   const template =
     templateId === undefined
       ? null
@@ -240,14 +332,21 @@ export async function loadPlanContext(
     .where('batch_id', '=', txn.batchId)
     .executeTakeFirstOrThrow(() => new Error(`No budget row for batch ${txn.batchId}`));
 
+  const noticeAt = await loadPreDebitNoticeAt(db, args.txnId);
+  const promise = await loadOpenPromise(db, args.txnId);
+
   return {
     txn,
-    attemptNo: history.firedCount + 1,
+    attemptNo,
     hoursSinceLastAttempt:
       history.lastFiredAt === null ? null : hoursBetween(history.lastFiredAt, args.now),
     contactsThisWeek: await countRecentContacts(db, txn.customerId, args.now),
+    callsThisWeek: await countRecentContacts(db, txn.customerId, args.now, 'voice'),
     consent,
     template,
+    onNcprRegistry: customer.on_ncpr_registry,
+    hoursSincePreDebitNotice: noticeAt === null ? null : hoursBetween(noticeAt, args.now),
+    openPromiseDueAt: promise?.promisedFor ?? null,
     batchFeeRemaining: (PaiseSchema.parse(budget.fee_budget_paise) -
       PaiseSchema.parse(budget.fee_spent_paise)) as Paise,
   };

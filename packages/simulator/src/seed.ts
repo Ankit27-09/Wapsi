@@ -15,7 +15,7 @@ import { generateBatch } from './generate.js';
  *   pnpm seed --arms rc,b0             # a subset, while iterating
  */
 
-const ALL_ARMS: readonly Arm[] = ['rc', 'b0', 'b1', 'b2', 'b3_oracle'];
+const ALL_ARMS: readonly Arm[] = ['rc', 'b0', 'b1', 'b2', 'b4', 'b3_oracle'];
 
 interface Args {
   readonly seed: number;
@@ -87,9 +87,19 @@ async function main(): Promise<void> {
         .map(([code, n]) => `${code} ${n}`)
         .join(', ');
 
+      // The class mix is printed first because it is the more informative of the two: a
+      // cause only means something inside a class, and a reader checking that all five
+      // domains are actually being exercised needs this line rather than the cause list.
+      const classes = Object.entries(result.byRiskClass)
+        .sort(([, a], [, b]) => b - a)
+        .map(([code, n]) => `${code} ${n}`)
+        .join(', ');
+
       process.stdout.write(
         `  ${arm.padEnd(10)} ${result.count} txns · ${result.customers} customers · ` +
-          `${result.novelStrings} novel · ${result.injectionStrings} injection\n` +
+          `${result.novelStrings} novel · ${result.injectionStrings} injection · ` +
+          `${result.promises} promises\n` +
+          `             ${classes}\n` +
           `             ${mix}\n`,
       );
     }

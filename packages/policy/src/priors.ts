@@ -31,10 +31,70 @@ export const TIMINGS = [
   'next_day',
   'salary_window',
   'alt_rail',
+  // The three buckets below are not retry backoffs. They exist because the timing that
+  // matters is a property of the DOMAIN, not of exponential decay: an e-mandate debit must
+  // be preceded by a notification a day ahead, a B2B invoice is paid when the buyer's
+  // payment run executes, and a broken promise is followed up the day after it broke.
+  'pre_debit_window',
+  'payment_run_window',
+  'promise_followup',
+  /**
+   * Five days out — the last point inside the permitted e-mandate retry window.
+   *
+   * Exists because the pre-debit notification has a knock-on effect worth naming: once a
+   * debit must be preceded by 24 hours of notice, every sub-day backoff is legally
+   * unavailable on a mandate rail. An issuer outage that a one-off payment recovers in
+   * fifteen minutes cannot be chased that way on a subscription at all.
+   */
+  'late_window',
 ] as const;
 
 export type Timing = (typeof TIMINGS)[number];
 export const TimingSchema = z.enum(TIMINGS);
+
+/**
+ * What a prior is a probability OF.
+ *
+ * A prior used to be keyed on (cause, attempt, timing) alone, which quietly assumed every
+ * attempt was a re-presentment of a charge. Once the same engine also sends payment links,
+ * pre-debit notifications and re-authorisation requests, that assumption is wrong in a way
+ * that cannot be papered over: "will a retry succeed at hour 72" and "will this customer
+ * re-authorise their mandate" are different questions about the same transaction.
+ *
+ * `charge` deliberately covers both `retry` and `switch_rail`. For an action that presents a
+ * charge, the attempt number and the timing are the whole story — which rail it lands on is
+ * already carried by the timing bucket (`alt_rail`), so splitting them would create two
+ * table rows that must always agree.
+ */
+export const PRIOR_KINDS = [
+  'charge',
+  'payment_link',
+  'notify',
+  'pre_debit_notify',
+  'remandate',
+] as const;
+
+export type PriorKind = (typeof PRIOR_KINDS)[number];
+export const PriorKindSchema = z.enum(PRIOR_KINDS);
+
+/** The prior kind a schedule action asks about. */
+export function priorKindFor(action: string): PriorKind {
+  switch (action) {
+    case 'retry':
+    case 'switch_rail':
+      return 'charge';
+    case 'payment_link':
+      return 'payment_link';
+    case 'notify':
+      return 'notify';
+    case 'pre_debit_notify':
+      return 'pre_debit_notify';
+    case 'remandate':
+      return 'remandate';
+    default:
+      throw new Error(`No prior kind defined for action "${action}"`);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -60,6 +120,8 @@ const PriorRowSchema = z
     reason_code: ReasonCodeSchema,
     attempt: z.number().int().min(1).max(5),
     timing: TimingSchema,
+    /** Omitted means `charge`, so every pre-existing retry row keeps its meaning. */
+    kind: PriorKindSchema.default('charge'),
     p_bps: BpsSchema,
     source: SourceSchema,
     assumption: z.string().min(1).optional(),
@@ -69,8 +131,20 @@ const PriorRowSchema = z
     path: ['assumption'],
   });
 
+/**
+ * A structural zero, and what it is zero for.
+ *
+ * `charging` means no re-presentment can succeed — the card is expired, the mandate is
+ * revoked — while leaving room for a non-charging intervention that has a genuine, non-zero
+ * chance. That distinction is the whole point: "cannot be retried" and "cannot be recovered"
+ * are different claims, and conflating them writes off money that a nudge would collect.
+ *
+ * `all` means nothing may fire at all, for reasons of risk or ignorance rather than
+ * mechanism, and any prior for that code is a contradiction.
+ */
 const StructuralZeroSchema = z.object({
   reason_code: ReasonCodeSchema,
+  scope: z.enum(['charging', 'all']),
   why: z.string().min(1),
 });
 
@@ -115,21 +189,22 @@ export interface PriorTable {
   readonly bands: { readonly citedPct: number; readonly assumedPct: number };
   /** Every row, for the sensitivity sweep to perturb. */
   readonly rows: readonly PriorRow[];
+  /** Codes no charging attempt can recover, and why. Includes the `all` ones. */
   readonly structuralZeros: ReadonlyMap<ReasonCode, string>;
-  prior(code: ReasonCode, attempt: number, timing: Timing): PriorLookup;
+  prior(code: ReasonCode, attempt: number, timing: Timing, kind?: PriorKind): PriorLookup;
   /** Perturbation band for a row, in percent. Assumed rows get the wider one. */
   bandPctFor(row: PriorRow): number;
 }
 
-const key = (code: ReasonCode, attempt: number, timing: Timing): string =>
-  `${code}|${attempt}|${timing}`;
+const key = (code: ReasonCode, attempt: number, timing: Timing, kind: PriorKind): string =>
+  `${code}|${attempt}|${timing}|${kind}`;
 
 export function buildPriorTable(raw: unknown): PriorTable {
   const parsed = PriorsFileSchema.parse(raw);
 
   const byKey = new Map<string, PriorRow>();
   for (const row of parsed.priors) {
-    const k = key(row.reason_code, row.attempt, row.timing);
+    const k = key(row.reason_code, row.attempt, row.timing, row.kind);
     if (byKey.has(k)) {
       // Two priors for one situation means the table disagrees with itself, and which
       // one wins would depend on file order. Refuse at load rather than pick.
@@ -138,18 +213,21 @@ export function buildPriorTable(raw: unknown): PriorTable {
     byKey.set(k, row);
   }
 
+  const zeroScopes = new Map<ReasonCode, 'charging' | 'all'>(
+    parsed.structural_zeros.map((entry) => [entry.reason_code, entry.scope]),
+  );
   const structuralZeros = new Map<ReasonCode, string>(
     parsed.structural_zeros.map((entry) => [entry.reason_code, entry.why]),
   );
 
-  // A code cannot be both structurally impossible and have a success prior. If it were,
-  // the gate's answer would depend on which lookup ran first.
+  // A code cannot be both structurally impossible and have a success prior for the same
+  // thing. If it were, the gate's answer would depend on which lookup ran first.
   for (const row of parsed.priors) {
-    const zero = structuralZeros.get(row.reason_code);
-    if (zero !== undefined) {
+    const scope = zeroScopes.get(row.reason_code);
+    if (scope === 'all' || (scope === 'charging' && row.kind === 'charge')) {
       throw new Error(
-        `${row.reason_code} is declared a structural zero but also has a prior ` +
-          `(attempt ${row.attempt}, ${row.timing}). One of the two is wrong.`,
+        `${row.reason_code} is declared a structural zero (scope: ${scope}) but also has a ` +
+          `${row.kind} prior (attempt ${row.attempt}, ${row.timing}). One of the two is wrong.`,
       );
     }
   }
@@ -160,15 +238,19 @@ export function buildPriorTable(raw: unknown): PriorTable {
     rows: parsed.priors,
     structuralZeros,
 
-    prior(code, attempt, timing) {
-      const zero = structuralZeros.get(code);
-      if (zero !== undefined) return { kind: 'structural_zero', why: zero };
+    prior(code, attempt, timing, kind = 'charge') {
+      const scope = zeroScopes.get(code);
+      if (scope === 'all' || (scope === 'charging' && kind === 'charge')) {
+        const why = structuralZeros.get(code);
+        if (why === undefined) throw new Error(`unreachable: zero scope without reason for ${code}`);
+        return { kind: 'structural_zero', why };
+      }
 
-      const row = byKey.get(key(code, attempt, timing));
+      const row = byKey.get(key(code, attempt, timing, kind));
       if (row === undefined) {
         return {
           kind: 'missing',
-          detail: `No published prior for ${code} attempt ${attempt} at ${timing}`,
+          detail: `No published prior for ${code} attempt ${attempt} at ${timing} (${kind})`,
         };
       }
 

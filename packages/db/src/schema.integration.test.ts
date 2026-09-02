@@ -239,6 +239,11 @@ describe.skipIf(!DATABASE_UP)('decisions: fired actions are identified, refusals
           trace_id: `ref1-${RUN}`,
           verdict: 'refuse_ev' as const,
           refuse_detail: 'expected value below floor',
+          // Every refusal names the rule that produced it, not just the prose. The
+          // `decision_refusal_names_its_rule` constraint enforces both halves — a refusal
+          // must name one and a fired decision must not — which is what makes "the consent
+          // bound cost us this much" a query rather than a grep over English sentences.
+          refuse_rule: 'ev_floor',
           ev_p_bps: 800,
           ev_net_paise: '-343',
         },
@@ -247,6 +252,7 @@ describe.skipIf(!DATABASE_UP)('decisions: fired actions are identified, refusals
           trace_id: `ref2-${RUN}`,
           verdict: 'refuse_bounds',
           refuse_detail: 'inside quiet hours',
+          refuse_rule: 'quiet_hours',
           ev_p_bps: 4500,
           ev_net_paise: '39114',
         },
@@ -265,6 +271,57 @@ describe.skipIf(!DATABASE_UP)('decisions: fired actions are identified, refusals
     // explain itself in rupees long after the fact.
     expect(refusals.every((r) => r.attempt_no === null)).toBe(true);
     expect(refusals.some((r) => r.ev_net_paise === '-343')).toBe(true);
+  });
+
+  it('refuses a refusal that does not name its rule, and a fired decision that does', async () => {
+    // BOTH HALVES, because either one alone is useless.
+    //
+    // Without the first, "what did the consent bound cost us?" silently omits whichever code
+    // path forgot to set the column — and an under-reported compliance cost is exactly the
+    // number a reader would rely on. Without the second, a fired decision could carry a rule
+    // that refused nothing, and the aggregate would count spend that happened as spend that
+    // was declined.
+    const base = {
+      txn_id: fx.txnId,
+      batch_id: fx.batchId,
+      policy_version: 1,
+      reason_code: 'insufficient_funds',
+      planned_action: 'none' as const,
+      ev_value_paise: '87698',
+      ev_cost_paise: '350',
+      ev_p_bps: 800,
+      ev_net_paise: '-343',
+    };
+
+    await expect(
+      db
+        .insertInto('decision')
+        .values({
+          ...base,
+          trace_id: `norule-${RUN}`,
+          verdict: 'refuse_ev',
+          refuse_detail: 'expected value below floor',
+          refuse_rule: null,
+        })
+        .execute(),
+    ).rejects.toThrow(/decision_refusal_names_its_rule/);
+
+    await expect(
+      db
+        .insertInto('decision')
+        .values({
+          ...base,
+          trace_id: `firedrule-${RUN}`,
+          verdict: 'fire',
+          planned_action: 'retry',
+          planned_rail: 'card',
+          planned_timing: 'immediate',
+          attempt_no: 1,
+          idempotency_key: keyFor(9_001),
+          refuse_rule: 'consent',
+        })
+        .execute(),
+    ).rejects.toThrow(/decision_refusal_names_its_rule/);
   });
 });
 

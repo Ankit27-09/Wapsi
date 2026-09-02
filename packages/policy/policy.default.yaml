@@ -48,7 +48,28 @@ global:
 
   # Channels that require an explicit opt-in before anything is sent. All of them,
   # in India.
-  require_consent_for_channels: [sms, whatsapp, email]
+  require_consent_for_channels: [sms, whatsapp, email, voice]
+
+  # Outbound calling is regulated separately from messaging, not more strictly of the
+  # same kind. Its own window, its own ceiling — both tighter — and the NCPR/DND
+  # registry overrides merchant consent entirely, which is checked per customer.
+  voice:
+    window:
+      start: "10:00"
+      end: "19:00"
+      tz: "Asia/Kolkata"
+    # One call a week. A second call is not twice the recovery, it is a complaint.
+    max_calls_per_customer_per_week: 1
+
+  # An e-mandate debit is lawful only if the customer was notified in advance. 24h is
+  # the RBI minimum; the engine refuses the charge outright when no notification is on
+  # record, which is the `pre_debit_notice` bound.
+  pre_debit_notice_hours: 24
+
+  # Cycles a recovered subscription is assumed to survive when the transaction does not
+  # say. This single figure decides how much more a subscription retry is worth than a
+  # one-off, so it is stated here rather than buried in the value calculation.
+  default_lifetime_cycles: 6
 
 # -----------------------------------------------------------------------------
 # Costs
@@ -68,6 +89,10 @@ costs:
     sms: 18
     whatsapp: 75
     email: 2
+    # ~22x an SMS: the telco leg, the TTS, and the agent turn. This is the number that
+    # makes the expected-value gate's choice between a message and a call a real one —
+    # a call has to be worth twenty-two messages before it fires.
+    voice: 400
   # Amortised model spend per decision, so the LLM's cost lands in net value
   # rather than being quietly excluded from it.
   llm_amortised_paise: 4
@@ -163,14 +188,6 @@ reason_codes:
       a nudge for a new instrument, so this is a messaging problem wearing a
       retry problem's clothes.
 
-  mandate_expired:
-    label: "Escalate for re-authorisation"
-    schedule: []
-    escalate: true
-    notify_on_escalate: true
-    template: tpl_remandate_v2
-    note: "There is no live authorisation to debit. Retry success is structurally zero."
-
   suspected_fraud_block:
     label: "Escalate, never contact"
     schedule: []
@@ -179,6 +196,165 @@ reason_codes:
     note: >-
       Messaging a customer whose transaction was risk-flagged is a compliance
       incident, and retrying past a risk decision is worse than the loss.
+
+  # --- lapsed authorisation --------------------------------------------------
+  #
+  # NOT an empty schedule any more, and that change is worth stating plainly. A lapsed
+  # mandate cannot be debited — that is a structural zero and remains one — but it can
+  # be RE-AUTHORISED, which is a different action with a real success rate. Treating
+  # "cannot be retried" as "cannot be recovered" writes off collectable revenue, and it
+  # is the exact mirror of the more famous error of retrying an expired card.
+  #
+  # `remandate` presents no charge, so it incurs no gateway fee. Its entire cost is the
+  # message, which is why two attempts clear the floor where a single retry would not.
+
+  mandate_expired:
+    label: "Sequenced re-authorisation requests"
+    schedule:
+      - { action: remandate, timing: next_day, notify: true }
+      - { action: remandate, timing: salary_window, notify: true }
+    min_gap_hours: 24
+    escalate: true
+    notify_on_escalate: true
+    template: tpl_remandate_v2
+    note: >-
+      No live authorisation exists, so every charge is zero forever. The path is a
+      re-authorisation request, then one follow-up, then a human. Both steps cost a
+      message and no fee.
+
+  # --- checkout abandonment --------------------------------------------------
+  #
+  # Nothing was ever charged, so there is no fee and nothing to re-present. The only
+  # lever is getting the customer back to a payable page, and the whole cost is the
+  # message — eighteen paise, not the ₹3.50 a card retry costs.
+  #
+  # HOW FAR THEY GOT IS THE ENTIRE SIGNAL, and the schedules say so: the OTP screen
+  # gets three attempts starting within minutes, the cart gets one the next day. Someone
+  # who entered their card and waited for an OTP meant to pay; someone who left a cart
+  # was often just browsing. Averaging those into one "abandoned checkout" strategy
+  # throws away the only useful information the funnel produced.
+
+  abandoned_at_otp:
+    label: "Fresh link immediately — the strongest intent signal in the funnel"
+    schedule:
+      - { action: payment_link, timing: immediate }
+      - { action: payment_link, timing: short_backoff }
+      - { action: payment_link, timing: next_day }
+    min_gap_hours: 0
+    template: tpl_otp_resume_v1
+    note: >-
+      The card was entered and authentication did not complete — usually an OTP that
+      never arrived or a session that expired, which a fresh link fixes outright. Speed
+      matters more here than anywhere else in the system: the customer is still at
+      their desk.
+
+  abandoned_at_payment:
+    label: "Resume link, twice"
+    schedule:
+      - { action: payment_link, timing: short_backoff }
+      - { action: payment_link, timing: next_day }
+    min_gap_hours: 0
+    template: tpl_checkout_resume_v1
+    note: >-
+      Reached method selection and left. Frequently a missing preferred method rather
+      than a change of mind, so the link is worth sending twice.
+
+  abandoned_at_address:
+    label: "One resume link the same day, one the next"
+    schedule:
+      - { action: payment_link, timing: medium_backoff }
+      - { action: payment_link, timing: next_day }
+    min_gap_hours: 0
+    template: tpl_checkout_resume_v1
+    note: >-
+      Intent is real but something interrupted — often a delivery charge or timeline
+      revealed at this step, which a few hours of reflection does not worsen.
+
+  abandoned_at_cart:
+    label: "One nudge, next day, and only if it pays for itself"
+    schedule:
+      - { action: payment_link, timing: next_day }
+    min_gap_hours: 0
+    template: tpl_cart_nudge_v1
+    note: >-
+      The weakest intent signal available — much of this is browsing. One nudge, and
+      the expected-value floor decides whether even that is worth sending. On a small
+      basket it will not be, and that refusal is correct rather than timid.
+
+  # --- overdue receivables ---------------------------------------------------
+  #
+  # B2B non-payment is almost never inability to pay. It is a process problem, and WHICH
+  # process determines who to contact, when, and whether to contact anyone at all. That
+  # is why these five causes have five different strategies rather than one ladder:
+  # sending the same escalating chase to an invoice stuck behind an approver and one
+  # stuck behind a monthly payment run gets both wrong.
+
+  awaiting_approval:
+    label: "Reach the approver, then time it to the run"
+    schedule:
+      - { action: notify, timing: next_day }
+      - { action: notify, timing: payment_run_window }
+    min_gap_hours: 48
+    escalate: true
+    notify_on_escalate: true
+    template: tpl_ar_approver_v1
+    note: >-
+      Nobody is refusing and nothing is wrong — the invoice is inside the buyer's
+      approval chain. Chasing the original contact achieves nothing because they are not
+      the blocker, so the message names the invoice and asks for the approver.
+
+  payment_run_cycle:
+    label: "One reminder, timed to land before the next run"
+    schedule:
+      - { action: notify, timing: payment_run_window }
+    min_gap_hours: 0
+    template: tpl_ar_run_reminder_v1
+    note: >-
+      Purely a timing problem, and the most recoverable class in the file. One reminder
+      landing before the buyer's next payment run beats three sent at random, so the
+      schedule has exactly one entry and spends the intelligence on when rather than
+      how often.
+
+  no_response:
+    label: "Escalating ladder with a hard stop"
+    schedule:
+      - { action: notify, timing: next_day }
+      - { action: notify, timing: payment_run_window }
+      - { action: notify, timing: payment_run_window, template: tpl_ar_voice_final_v1 }
+    min_gap_hours: 72
+    escalate: true
+    notify_on_escalate: false
+    template: tpl_ar_chase_v1
+    note: >-
+      The genuine collections case. The ladder climbs channel rather than volume — two
+      messages, then one call — and STOPS. The third step names a voice template, which
+      is the entire mechanism by which the ladder escalates: the template carries its
+      own channel. After it, a human or nothing.
+
+  promised_not_paid:
+    label: "One call the day after the promise broke, then a human"
+    schedule:
+      - { action: notify, timing: promise_followup, template: tpl_ar_voice_final_v1 }
+    min_gap_hours: 0
+    escalate: true
+    notify_on_escalate: false
+    template: tpl_ar_promise_broken_v1
+    note: >-
+      A broken promise is a strong negative signal and it changes the right action, not
+      just the odds. Another SMS is what the buyer already ignored, so this goes
+      straight to a call — and then to a human, because a second broken promise is a
+      commercial problem rather than a dunning one.
+
+  disputed_line_item:
+    label: "Human immediately, no automated contact"
+    schedule: []
+    escalate: true
+    notify_on_escalate: false
+    note: >-
+      The buyer disagrees with something on the invoice. Automated chasing makes this
+      strictly worse: it applies pressure over an amount genuinely in question and
+      damages a relationship worth more than the invoice. The correct automated action
+      is to stop and hand over.
 
   unknown:
     label: "Quarantine and cluster"
@@ -189,3 +365,105 @@ reason_codes:
       Reached when calibrated confidence is below threshold, or the reason string
       is genuinely novel. No intervention fires on an unclassified root cause —
       guessing would spend money on a coin flip.
+
+# -----------------------------------------------------------------------------
+# Per-risk-class overrides
+#
+# The same cause means different things in different classes. Only the differences
+# appear here; anything absent falls back to the base strategy above.
+#
+# A full 5-classes x 18-codes matrix would be 90 entries, most of them identical,
+# and identical duplicates are exactly where configuration drifts out of step with
+# itself. The loader validates every override against the class: a cause the class
+# cannot have, or an intervention it does not permit, fails at load rather than
+# mid-batch on one unlucky transaction.
+# -----------------------------------------------------------------------------
+class_overrides:
+
+  # A failed billing cycle is not a failed payment that happens to repeat. Two things
+  # change, and both change the decision:
+  #
+  #   1. THE VALUE. Losing a cycle usually means losing the subscriber, so the amount at
+  #      risk is the margin on every remaining cycle, not on this one. Same probability,
+  #      several times the justified spend.
+  #   2. THE LAW. The debit runs on an e-mandate, so a charge is unlawful without a
+  #      pre-debit notification at least 24 hours earlier. That is not a courtesy step
+  #      that can be skipped when the retry looks profitable — the engine refuses the
+  #      charge outright when no notification is on record.
+  #
+  # So every schedule here leads with the notification and retries after it matures.
+  # The notification costs a message and no fee, which is what makes the sequence
+  # affordable rather than a tax on recovery.
+  subscription_failure:
+
+    insufficient_funds:
+      label: "Notify, then debit inside the permitted window"
+      schedule:
+        - { action: pre_debit_notify, timing: pre_debit_window, notify: true }
+        - { action: retry, timing: salary_window }
+        - { action: retry, timing: late_window }
+      min_gap_hours: 0
+      escalate: true
+      notify_on_escalate: true
+      template: tpl_predebit_notice_v1
+      note: >-
+        The notification lands 24h out and doubles as the nudge that a balance is
+        needed, which is why it is worth sending even though it presents no charge. The
+        debit then follows in the salary window, lawfully, with the notice matured, and
+        one final attempt lands before the retry window closes.
+
+    issuer_down:
+      label: "Notify, then debit — the short backoff is not available here"
+      schedule:
+        - { action: pre_debit_notify, timing: pre_debit_window, notify: true }
+        - { action: retry, timing: salary_window }
+        - { action: retry, timing: late_window }
+      min_gap_hours: 0
+      template: tpl_predebit_notice_v1
+      note: >-
+        WORTH READING TWICE, because it is a real cost of the e-mandate regime and not a
+        modelling shortcut: a one-off payment recovers an issuer outage with a
+        fifteen-minute backoff, and a subscription CANNOT. The debit needs 24 hours of
+        notice, so every sub-day timing is legally unavailable on a mandate rail. The
+        engine therefore waits and retries late rather than pretending it can be quick.
+
+    do_not_honour:
+      label: "Notify, one probe, then re-authorise"
+      schedule:
+        - { action: pre_debit_notify, timing: pre_debit_window, notify: true }
+        - { action: retry, timing: salary_window }
+        - { action: remandate, timing: late_window, notify: true }
+      min_gap_hours: 0
+      escalate: true
+      notify_on_escalate: true
+      template: tpl_predebit_notice_v1
+      note: >-
+        On a subscription this code is often a card control the customer can lift, or a
+        mandate the bank has quietly stopped honouring. One probe, and if that fails the
+        productive action is a fresh authorisation rather than a fourth debit.
+
+    card_expired:
+      label: "Ask for a new instrument, twice"
+      schedule:
+        - { action: remandate, timing: next_day, notify: true }
+        - { action: remandate, timing: salary_window, notify: true }
+      min_gap_hours: 24
+      escalate: true
+      notify_on_escalate: true
+      template: tpl_update_card_v4
+      note: >-
+        Terminal for the stored card and worth chasing anyway, because the subscription
+        behind it is worth several cycles. A one-off gets escalated; this gets a
+        sequence, and the difference is entirely the value term.
+
+    network_timeout:
+      label: "Notify, then one re-present"
+      schedule:
+        - { action: pre_debit_notify, timing: pre_debit_window, notify: true }
+        - { action: retry, timing: salary_window }
+      min_gap_hours: 0
+      template: tpl_predebit_notice_v1
+      note: >-
+        Transport-layer, and cheap to recover — but not quickly, for the same reason as
+        the outage case above. The notice comes first, so the immediate re-present that
+        works on a one-off is unavailable here.

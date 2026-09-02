@@ -29,6 +29,7 @@ export {
 export {
   type GenerateOptions,
   type GeneratedBatch,
+  type PlannedCustomer,
   type PlannedTxn,
   DEFAULT_FEE_BUDGET_PER_TXN_PAISE,
   SIM_EPOCH,

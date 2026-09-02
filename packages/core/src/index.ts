@@ -75,9 +75,25 @@ export {
   ChannelSchema,
   isTerminal,
   mayEverContact,
+  isNeverContact,
+  isNotifiable,
 } from './taxonomy.js';
 
 export type { Gateway, GatewayOutcome, GatewayRequest } from './gateway.js';
+
+export {
+  type Intervention,
+  type RiskClass,
+  type RiskClassMeta,
+  INTERVENTIONS,
+  RISK_CLASSES,
+  RISK_CLASS_META,
+  InterventionSchema,
+  RiskClassSchema,
+  causeIsValidFor,
+  incursGatewayFee,
+  interventionIsValidFor,
+} from './risk.js';
 
 export {
   type LocalClock,
@@ -88,6 +104,8 @@ export {
   minutesSinceMidnight,
   parseHHMM,
   isWithinLocalWindow,
+  deferPastLocalWindow,
+  deferIntoLocalWindow,
   hoursBetween,
   addHours,
   HHMMSchema,

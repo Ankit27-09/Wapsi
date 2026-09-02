@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest';
 import fc from 'fast-check';
 import {
   REASON_CODES,
+  RISK_CLASSES,
+  RISK_CLASS_META,
   bps,
+  causeIsValidFor,
+  incursGatewayFee,
   isTerminal,
   mayEverContact,
   paise,
@@ -11,6 +15,7 @@ import {
   toRupeeString,
   type Rail,
   type ReasonCode,
+  type RiskClass,
 } from '@rc/core';
 import { buildPolicy, loadPolicy, loadPriorTable, type Policy } from '@rc/policy';
 import { planNext, type PlanInput, type TemplateRef } from './plan.js';
@@ -41,22 +46,52 @@ const REGISTERED_SMS: TemplateRef = {
   registered: true,
 };
 
+/**
+ * A one-off card payment, unless the test says otherwise.
+ *
+ * `payment_failure` is the default class because it is the one with no special mechanics:
+ * nothing is mandate-backed, nothing recurs, no promise is open. A test about quiet hours
+ * should not have to opt out of the e-mandate notice requirement to say what it means.
+ */
 function input(overrides: Partial<PlanInput> & { readonly reasonCode: ReasonCode }): PlanInput {
   return {
     now: MIDDAY_IST,
     policy,
     priors,
+    riskClass: 'payment_failure',
     amount: paiseFromRupeeString('5000.00'),
     marginBps: bps(1900),
+    lifetimeCycles: null,
     currentRail: 'card' satisfies Rail,
     attemptNo: 1,
     hoursSinceLastAttempt: null,
     contactsThisWeek: 0,
+    callsThisWeek: 0,
     consent: 'opt_in',
     template: REGISTERED_SMS,
+    onNcprRegistry: false,
+    mandateBacked: false,
+    hoursSincePreDebitNotice: null,
+    openPromiseDueAt: null,
     batchFeeRemaining: paiseFromRupeeString('5000.00'),
     ...overrides,
   };
+}
+
+/**
+ * The risk class each cause belongs to, for property tests that range over the taxonomy.
+ *
+ * Needed because a cause is only meaningful inside a class: handing `planNext` an
+ * `abandoned_at_otp` with `riskClass: 'payment_failure'` asks it about a transaction that
+ * cannot exist, and it would correctly refuse on legality rather than on whatever the test
+ * was actually checking.
+ */
+function classFor(code: ReasonCode): RiskClass {
+  for (const riskClass of RISK_CLASSES) {
+    if (riskClass === 'payment_failure') continue;
+    if (causeIsValidFor(riskClass, code)) return riskClass;
+  }
+  return 'payment_failure';
 }
 
 const anyReasonCode = fc.constantFrom(...REASON_CODES);
@@ -67,24 +102,46 @@ describe('planNext — every plan carries its arithmetic', () => {
     // cannot say what it would have been worth is a log line, not an audit record.
     fc.assert(
       fc.property(anyReasonCode, fc.integer({ min: 1, max: 5 }), (reasonCode, attemptNo) => {
-        const plan = planNext(input({ reasonCode, attemptNo, hoursSinceLastAttempt: 999 }));
+        const plan = planNext(
+          input({
+            reasonCode,
+            riskClass: classFor(reasonCode),
+            attemptNo,
+            hoursSinceLastAttempt: 999,
+          }),
+        );
 
         expect(typeof plan.ev.value).toBe('bigint');
         expect(typeof plan.ev.cost).toBe('bigint');
         expect(typeof plan.ev.net).toBe('bigint');
+
         // Contribution margin at stake is a property of the transaction, so it is known
-        // even when nothing is permitted to happen.
-        expect(plan.ev.value).toBe(paiseFromRupeeString('950.00'));
+        // even when nothing is permitted to happen — multiplied, for a recurring class, by
+        // the horizon the gate is entitled to price against.
+        const cycles = RISK_CLASS_META[classFor(reasonCode)].recurring
+          ? policy.defaultLifetimeCycles
+          : 1;
+        expect(plan.ev.value).toBe(paiseFromRupeeString('950.00') * BigInt(cycles));
       }),
     );
   });
 });
 
 describe('planNext — structural impossibility', () => {
-  it('never fires an attempt on a terminal reason code', () => {
-    // Not "rarely", and not "because the floor happens to be set high enough". An expired
-    // card or a revoked mandate has nothing to debit, so no combination of amount, margin
-    // or history may produce a fired attempt.
+  it('never presents a CHARGE on a terminal reason code', () => {
+    // THE PREMISE OF THIS TEST CHANGED, and the change is the point.
+    //
+    // It used to assert that a terminal code never fires anything at all. That was true
+    // while every intervention was a charge, and it is now wrong — thirteen of the eighteen
+    // codes are terminal, including every abandoned checkout and every overdue invoice,
+    // because nothing was ever charged on them. Those are the most recoverable classes in
+    // the system, and a payment link collects a great deal of what they represent.
+    //
+    // `terminal` means: NO RE-PRESENTMENT CAN SUCCEED. It says nothing about whether the
+    // money is recoverable. So the property worth holding is the narrower and stronger one —
+    // no combination of amount, margin or history may produce an action that presents a
+    // charge — and it is exactly the invariant that stops a fee being spent against a
+    // probability of zero.
     const terminal = REASON_CODES.filter(isTerminal);
     expect(terminal.length).toBeGreaterThan(0);
 
@@ -95,10 +152,41 @@ describe('planNext — structural impossibility', () => {
         fc.bigInt({ min: 1n, max: 50_000_000n }),
         (reasonCode, attemptNo, amount) => {
           const plan = planNext(
+            input({
+              reasonCode,
+              riskClass: classFor(reasonCode),
+              attemptNo,
+              amount: paise(amount),
+              marginBps: bps(10_000),
+            }),
+          );
+
+          if (plan.kind === 'fire') {
+            expect(incursGatewayFee(plan.action)).toBe(false);
+            // And it cost no fee, which is the consequence that actually protects the money.
+            expect(plan.ev.cost).toBeLessThan(policy.gatewayFee('upi_collect'));
+          }
+        },
+      ),
+    );
+  });
+
+  it('never fires anything at all on a code that is terminal AND unreachable', () => {
+    // The subset where the original, stronger claim still holds in full: a risk-flagged
+    // transaction and an unidentified cause have no charge to present AND no permitted
+    // contact, so there is no action of any kind left.
+    fc.assert(
+      fc.property(
+        fc.constantFrom('suspected_fraud_block' as const, 'unknown' as const),
+        fc.integer({ min: 1, max: 5 }),
+        fc.bigInt({ min: 1n, max: 50_000_000n }),
+        (reasonCode, attemptNo, amount) => {
+          const plan = planNext(
             input({ reasonCode, attemptNo, amount: paise(amount), marginBps: bps(10_000) }),
           );
           expect(plan.kind).toBe('refuse');
           if (plan.kind === 'refuse') expect(plan.verdict).toBe('refuse_terminal');
+          expect(plan.contact.send).toBe(false);
         },
       ),
     );
@@ -120,7 +208,9 @@ describe('planNext — the kill switch', () => {
   it('refuses everything and reports itself as the reason', () => {
     fc.assert(
       fc.property(anyReasonCode, fc.integer({ min: 1, max: 5 }), (reasonCode, attemptNo) => {
-        const plan = planNext(input({ reasonCode, attemptNo, policy: killed }));
+        const plan = planNext(
+          input({ reasonCode, riskClass: classFor(reasonCode), attemptNo, policy: killed }),
+        );
         expect(plan.kind).toBe('refuse');
         if (plan.kind === 'refuse') expect(plan.verdict).toBe('refuse_kill_switch');
         expect(plan.contact.send).toBe(false);

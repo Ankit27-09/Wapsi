@@ -2,19 +2,25 @@ import {
   ZERO,
   add,
   bps,
+  hoursBetween,
   mulBps,
   paise,
   sub,
   type Bps,
+  type Channel,
   type Paise,
   type ReasonCode,
+  type TemplateId,
 } from '@rc/core';
 import type { Arm as ArmId } from '@rc/db';
-import type { Policy, PriorTable } from '@rc/policy';
+import { priorKindFor, type ConsentState, type Policy, type PriorTable } from '@rc/policy';
 import {
   DEFAULT_FEE_BUDGET_PER_TXN_PAISE,
   deriveRng,
   planTxns,
+  registeredTemplates,
+  type PlannedCustomer,
+  type PlannedTxn,
   type Rng,
   type TruthModel,
 } from '@rc/simulator';
@@ -42,11 +48,25 @@ import { attemptLandsAt, gapSinceLastAttempt } from './schedule.js';
  * Only persistence is skipped. A sweep that reimplemented the decision logic would be
  * measuring a second system that happens to resemble the first.
  *
- * What is deliberately excluded: MESSAGING. Customer contact costs money and — as the
- * README states — the truth model has no notion of a customer responding to a nudge, so
- * including it would add cost and no recovery to every arm equally. Excluding it keeps the
- * sweep about the retry policy, which is what varies. The omitted cost is roughly ₹0.42 of
- * a ₹477 total.
+ * MESSAGING USED TO BE EXCLUDED HERE, and that exclusion is now gone. It was defensible
+ * while every intervention was a charge: the truth model had no notion of a customer
+ * responding to a nudge, so contact added cost and no recovery to every arm equally, and
+ * omitting it kept the sweep about the retry policy. Roughly ₹0.42 of a ₹477 total.
+ *
+ * It stopped being defensible the moment four of the five risk classes recover money by
+ * messaging and nothing else. Excluding contact would have made every checkout and every
+ * receivable unrecoverable in the sweep, so the robustness check would have reported the
+ * retry policy as the whole system while silently scoring most of it at zero. Messages are
+ * therefore planned, priced and drawn against here, on the same truth table as everything
+ * else.
+ *
+ * ONE MODELLING DECISION WORTH READING, because it moves the numbers. A recovered
+ * subscription cycle is scored at `margin x remaining cycles`, not at one cycle's margin —
+ * the same basis the expected-value gate priced it on. Scoring the decision on one basis and
+ * its outcome on another would guarantee that every subscription action looked like a loss,
+ * which is not a conservative choice but simply an incoherent one. The premise being
+ * asserted is explicit: a saved subscription keeps paying. Cash collected this cycle is
+ * reported separately in the run report, and the two are never added together.
  */
 
 export interface SweepArmResult {
@@ -66,7 +86,91 @@ export interface SweepDraw {
 }
 
 /** Arms the sweep compares. The oracle is excluded: it is a ceiling, not a competitor. */
-const SWEEP_ARMS: readonly ArmId[] = ['b0', 'b1', 'b2', 'rc'];
+const SWEEP_ARMS: readonly ArmId[] = ['b0', 'b1', 'b2', 'b4', 'rc'];
+
+/**
+ * Resolve a policy template id to the variant this customer would receive.
+ *
+ * Mirrors `loadTemplate` in `@rc/engine` without a database: same family-and-language lookup,
+ * same English fallback when no variant exists, same rule that only a registered template may
+ * be sent. The seed list is the single source both paths read, so the sweep cannot resolve a
+ * template the persisted run would not.
+ *
+ * This replaced a single hardcoded "registered SMS template" handed to every arm. That
+ * shortcut made every contact sendable, which meant the sweep could not see a voice
+ * escalation, could not see a missing template, and reported the robustness of a system in
+ * which messaging was always available.
+ */
+function resolveTemplate(
+  id: string,
+  language: 'en' | 'hi_latn',
+): { readonly id: TemplateId; readonly channel: Channel; readonly registered: boolean } | null {
+  const seeds = registeredTemplates();
+  const named = seeds.find((seed) => seed.id === id);
+  if (named === undefined) return null;
+
+  const variant =
+    language === 'en'
+      ? named
+      : (seeds.find(
+          (seed) =>
+            seed.family === named.family &&
+            seed.channel === named.channel &&
+            seed.language === language,
+        ) ?? named);
+
+  return {
+    id: variant.id as TemplateId,
+    channel: variant.channel,
+    // Every seeded template is registered, by construction — `ensureTemplatesSeeded` writes
+    // them with a DLT id and the schema refuses the alternative. Stated rather than assumed
+    // so a future draft-status seed does not silently become sendable here.
+    registered: true,
+  };
+}
+
+/**
+ * The consent state this customer has for the channel a step would use.
+ *
+ * `unknown` for a channel they never expressed a preference about, which is not `opt_in` —
+ * the whole point of modelling it. Email is `unknown` throughout because the seeded book has
+ * no email consent rows, exactly as the persisted run finds it.
+ */
+function consentFor(
+  customer: PlannedCustomer,
+  template: { readonly channel: Channel } | null,
+): ConsentState {
+  if (template === null) return 'unknown';
+  if (template.channel === 'voice') return customer.voiceOptIn ? 'opt_in' : 'unknown';
+  if (template.channel === 'sms') return customer.smsConsent ?? 'unknown';
+  return 'unknown';
+}
+
+/** Rolling contact window, identical to `CONTACT_WINDOW_DAYS` in `@rc/engine`. */
+const CONTACT_WINDOW_MS = 7 * 86_400_000;
+
+/** Sends inside the rolling window ending at `now`, mirroring `countRecentContacts`. */
+function countWithinWindow(sends: readonly Date[] | undefined, now: Date): number {
+  if (sends === undefined) return 0;
+  const since = now.getTime() - CONTACT_WINDOW_MS;
+  return sends.filter((at) => at.getTime() >= since).length;
+}
+
+function record(ledger: Map<number, Date[]>, key: number, at: Date): void {
+  const existing = ledger.get(key);
+  if (existing === undefined) ledger.set(key, [at]);
+  else existing.push(at);
+}
+
+/** Whether a live e-mandate backs this transaction, mirroring `loadTxnContext`. */
+function mandateBacked(txn: PlannedTxn): boolean {
+  return txn.isRecurring && txn.riskClass !== 'mandate_lapsed';
+}
+
+/** Multiply a paise amount by a whole cycle count. */
+function mulCycles(amount: Paise, cycles: number): Paise {
+  return (amount * BigInt(cycles)) as Paise;
+}
 
 export interface SimulateOptions {
   readonly seed: number;
@@ -130,7 +234,7 @@ export function simulateArm(options: SimulateOptions): SweepArmResult {
   // issuers being regenerated separately from the same RNG stream. Two derivations of the
   // same thing are two things that can drift, and a sweep running against a differently
   // assigned population would be answering a different question from the one it reports.
-  const { txns, customerIssuers } = planTxns(options.seed, options.count);
+  const { txns, customers, customerIssuers } = planTxns(options.seed, options.count);
 
   let valueRecovered = ZERO;
   let cost = ZERO;
@@ -140,8 +244,27 @@ export function simulateArm(options: SimulateOptions): SweepArmResult {
   // The identical ceiling `generateBatch` writes, from the same exported constant.
   let feeRemaining = paise(BigInt(DEFAULT_FEE_BUDGET_PER_TXN_PAISE * options.count));
 
-  for (const [index, txn] of txns.entries()) {
+  // PER CUSTOMER and TIME-WINDOWED, because the real ceiling is both. With 1.6 failures per
+  // customer, a per-transaction counter would let one customer receive two messages about
+  // each of three invoices and call it three separate weeks — the loophole the ceiling exists
+  // to close. Send instants rather than counts, so the rolling seven-day window can be
+  // applied exactly as `countRecentContacts` applies it.
+  const sendsByCustomer = new Map<number, Date[]>();
+  const callsSentByCustomer = new Map<number, Date[]>();
+
+  // IN THE SAME ORDER THE DATABASE RUNNER PROCESSES THEM: by failure time, tie-broken on the
+  // generation index. Iterating in generation order was harmless while transactions were
+  // independent, and became a real divergence once the contact ceiling coupled the ones
+  // belonging to a single customer — the two paths disagreed by one attempt in two hundred.
+  const ordered = [...txns.entries()].sort(
+    ([leftIndex, left], [rightIndex, right]) =>
+      left.failedAt.getTime() - right.failedAt.getTime() || leftIndex - rightIndex,
+  );
+
+  for (const [index, txn] of ordered) {
     const issuerId = customerIssuers[txn.customerIndex];
+    const customer = customers[txn.customerIndex];
+    if (customer === undefined) throw new Error('unreachable: customer index out of range');
     if (issuerId === undefined) throw new Error('unreachable: customer index out of range');
 
     // What the policy BELIEVES the cause is. The truth model is always consulted with the
@@ -158,17 +281,31 @@ export function simulateArm(options: SimulateOptions): SweepArmResult {
     let clock = txn.failedAt;
     let attemptNo = 1;
     let previousLanding: Date | null = null;
+    let noticeSentAt: Date | null = null;
 
     for (let step = 0; step < 6; step += 1) {
+      // The step's own template, resolved exactly as `loadPlanContext` resolves it: the
+      // step's override wins over the reason code's default, and the language variant is
+      // selected for this customer. Resolved BEFORE the landing time, because a voice
+      // template changes the landing — a call has to fall inside the permitted window.
+      const scheduledStep = policy.scheduleEntry(believedCode, attemptNo, txn.riskClass);
+      const templateId =
+        scheduledStep?.template ?? policy.forReason(believedCode, txn.riskClass).template;
+      const template =
+        templateId === undefined ? null : resolveTemplate(templateId, customer.language);
+
       // Identical scheduling to the database runner, from the same helper. A sweep that
       // scheduled attempts differently would be measuring a different system.
       const landsAt = attemptLandsAt({
         policy,
         reasonCode: believedCode,
+        riskClass: txn.riskClass,
         attemptNo,
         failedAt: txn.failedAt,
         previousLanding,
         fallback: clock,
+        promiseDueAt: txn.promise?.promisedFor ?? null,
+        ...(template === null ? {} : { channel: template.channel }),
       });
       clock = landsAt;
 
@@ -178,35 +315,82 @@ export function simulateArm(options: SimulateOptions): SweepArmResult {
           policy,
           priors,
           reasonCode: believedCode,
+          riskClass: txn.riskClass,
           amount: paise(BigInt(txn.amountPaise)),
           marginBps: bps(txn.marginBps),
+          lifetimeCycles: txn.lifetimeCycles,
           currentRail: txn.rail,
           attemptNo,
           hoursSinceLastAttempt: gapSinceLastAttempt(previousLanding, landsAt),
-          contactsThisWeek: 0,
-          consent: 'unknown',
-          // No template, so no contact is ever planned. See the module header: messaging is
-          // excluded from the sweep because it costs money and recovers none in this model.
-          template: null,
+          contactsThisWeek: countWithinWindow(sendsByCustomer.get(txn.customerIndex), landsAt),
+          callsThisWeek: countWithinWindow(callsSentByCustomer.get(txn.customerIndex), landsAt),
+          // The customer's REAL consent, from the same planned population the persisted run
+          // writes. The sweep used to hand every arm `opt_in` and a universal template,
+          // which measured the robustness of a system in which nobody had opted out.
+          consent: consentFor(customer, template),
+          template,
+          onNcprRegistry: customer.onNcprRegistry,
+          mandateBacked: mandateBacked(txn),
+          hoursSincePreDebitNotice:
+            noticeSentAt === null ? null : hoursBetween(noticeSentAt, landsAt),
+          openPromiseDueAt:
+            txn.promise?.status === 'open' ? txn.promise.promisedFor : null,
           batchFeeRemaining: feeRemaining,
         },
         { priors, truth: { model: truth, issuerId } },
       );
 
-      if (plan === null || plan.kind !== 'fire') break;
+      if (plan === null) break;
 
-      const fee = policy.gatewayFee(plan.rail);
+      // A REFUSAL CAN STILL SEND, and forgetting that cost the parity test 126 paise —
+      // exactly seven SMS. An escalation is a contact with no attempt: the policy hands a
+      // terminal cause to a human and tells the customer, which the persisted path records
+      // and charges. The sweep broke out of the loop before charging it, so it ran seven
+      // messages cheaper than the run it claims to reproduce.
+      if (plan.kind !== 'fire') {
+        if (plan.contact.send) {
+          cost = add(cost, policy.messageCost(plan.contact.channel));
+          record(sendsByCustomer, txn.customerIndex, landsAt);
+          if (plan.contact.channel === 'voice') record(callsSentByCustomer, txn.customerIndex, landsAt);
+        }
+        break;
+      }
+
+      const kind = priorKindFor(plan.action);
+      const fee = kind === 'charge' ? policy.gatewayFee(plan.rail) : ZERO;
       if (fee > feeRemaining) break;
 
       feeRemaining = sub(feeRemaining, fee);
 
-      // Gateway fees only. The amortised model cost still enters the EXPECTED-value
-      // arithmetic — the policy is right to budget for it when deciding — but it is not a
-      // realised cost here, because the sweep runs on true causes with no classifier in the
-      // loop. Charging it would put the sweep ₹0.04 an attempt below the run it is meant to
-      // reproduce, for a model call that never happened.
+      // Gateway fees AND message costs. The amortised model cost still enters the
+      // EXPECTED-value arithmetic — the policy is right to budget for it when deciding — but
+      // it is not a realised cost here, because the sweep runs on true causes with no
+      // classifier in the loop. Charging it would put the sweep ₹0.04 an attempt below the
+      // run it is meant to reproduce, for a model call that never happened.
       cost = add(cost, fee);
+      if (plan.contact.send) {
+        cost = add(cost, policy.messageCost(plan.contact.channel));
+        // Both ledgers record a call: a call is a contact as well as a call, so the general
+        // weekly ceiling still binds. Recording it only against the voice ceiling would let
+        // one call plus two messages through a limit of two.
+        record(sendsByCustomer, txn.customerIndex, landsAt);
+        if (plan.contact.channel === 'voice') {
+          record(callsSentByCustomer, txn.customerIndex, landsAt);
+        }
+      }
       fired += 1;
+
+      // A pre-debit notice matures for the rest of this transaction's sequence. Tracked here
+      // rather than read back, because the sweep has no `message_send` table — and without
+      // it every mandate-backed retry after the notice would refuse itself with
+      // `pre_debit_notice`, silently zeroing the whole subscription class.
+      //
+      // Conditional on the message actually being SENT, exactly as the persisted path is: a
+      // notice suppressed by consent or quiet hours never reached the customer, so the debit
+      // that follows it is still unlawful.
+      if (plan.action === 'pre_debit_notify' && plan.contact.send) {
+        noticeSentAt = landsAt;
+      }
 
       // Keyed on the world and the specific attempt, so a draw's outcomes are reproducible
       // and independent of the order arms happen to run in.
@@ -217,7 +401,7 @@ export function simulateArm(options: SimulateOptions): SweepArmResult {
       // exactly — asserted by a test. And every world faces the SAME coin flips, so a
       // difference between worlds is attributable to the world rather than to luck, which
       // is the question a sensitivity analysis is asking.
-      const rng = deriveRng(options.seed, `${index}:${attemptNo}:${plan.timing}`);
+      const rng = deriveRng(options.seed, `${index}:${attemptNo}:${plan.timing}:${kind}`);
 
       // The TRUE cause, always. The world does not care what the classifier decided — an
       // attempt timed for a salary window against a payment that actually failed on a
@@ -228,12 +412,17 @@ export function simulateArm(options: SimulateOptions): SweepArmResult {
         attemptNo,
         plan.timing,
         issuerId,
+        kind,
       );
 
       if (success) {
+        // Scored on the SAME basis the decision was priced on. See the module header: using
+        // one cycle here and six in the gate would make every subscription action look like
+        // a loss by construction.
+        const cycles = txn.lifetimeCycles ?? 1;
         valueRecovered = add(
           valueRecovered,
-          mulBps(paise(BigInt(txn.amountPaise)), bps(txn.marginBps)),
+          mulCycles(mulBps(paise(BigInt(txn.amountPaise)), bps(txn.marginBps)), cycles),
         );
         recovered += 1;
         break;

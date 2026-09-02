@@ -17,7 +17,11 @@ export type {
   ClassifyMethod,
   ConsentState,
   Database,
+  PlannedAction,
+  PromiseSource,
+  PromiseStatus,
   Rail,
+  RiskClass,
   Timing,
   Verdict,
 } from './schema.js';
