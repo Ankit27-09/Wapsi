@@ -98,6 +98,21 @@ const DIRECTIONS = [
   },
 ] as const;
 
+/** The connector between flow steps. Inline so it inherits colour and needs no request. */
+function Chevron() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M9 5l7 7-7 7"
+        stroke="currentColor"
+        strokeWidth="2.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 /** The five kinds of revenue at risk, for the problem statement. */
 const LEAKS = [
   { code: 'payment_failure', label: 'A payment failed', detail: 'Card declined, issuer down, 3DS abandoned' },
@@ -217,6 +232,53 @@ export default async function Home({
           above it makes exactly this promise — that a different seed moves every figure. A
           control beats a sentence saying the same thing. */}
       <SeedPicker current={seed} path="/" />
+
+      {/* ---------- how it works ----------
+          The hero makes a claim and the sections below prove it. This is the shape of the
+          mechanism in between, in three steps, so a reader knows what they are about to
+          look at. */}
+      <h3>How one stuck rupee is handled</h3>
+      <div className="flow">
+        <div className="flow-step">
+          <div className="flow-num">01 · DIAGNOSE</div>
+          <h4>Read the failure</h4>
+          <p>
+            Messy gateway text — <code className="mono">51 NSF</code>,{' '}
+            <code className="mono">paisa nahi tha</code>,{' '}
+            <code className="mono">funnel_exit step=otp</code> — becomes one of eighteen
+            causes. Below a calibrated confidence it becomes{' '}
+            <code className="mono">unknown</code>, which permits no action at all.
+          </p>
+        </div>
+
+        <div className="flow-arrow">
+          <Chevron />
+        </div>
+
+        <div className="flow-step">
+          <div className="flow-num">02 · PRICE</div>
+          <h4>Cost it out</h4>
+          <p>
+            The cause selects a strategy, the strategy names a timing, and the timing carries
+            a published success probability. Multiply by the margin at stake, subtract the fee
+            and the message — all in integer paise.
+          </p>
+        </div>
+
+        <div className="flow-arrow">
+          <Chevron />
+        </div>
+
+        <div className="flow-step decisive">
+          <div className="flow-num">03 · DECIDE</div>
+          <h4>Usually, refuse</h4>
+          <p>
+            Legality first, then economics. Consent, quiet hours, weekly ceilings, the
+            e-mandate notice period — then the floor. Whatever the answer, the arithmetic and
+            the rule that produced it are written to an append-only trail.
+          </p>
+        </div>
+      </div>
 
       {/* ---------- the problem ---------- */}
       <h3>Five ways a merchant leaks revenue</h3>

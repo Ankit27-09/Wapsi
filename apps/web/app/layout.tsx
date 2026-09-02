@@ -49,10 +49,8 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en" className={`${display.variable} ${mono.variable}`}>
       <body>
-        <div className="shell">
-          <Nav />
-          <main className="content">{children}</main>
-        </div>
+        <Nav />
+        <main className="content">{children}</main>
       </body>
     </html>
   );
