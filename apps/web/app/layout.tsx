@@ -4,7 +4,9 @@ import './globals.css';
 
 export const metadata = {
   title: 'Recovery Controller',
-  description: 'Expected-value gated payment recovery — operations console',
+  description:
+    'Expected-value gated revenue recovery across five risk classes — Razorpay AI ' +
+    'Buildathon 2026, Track 03',
 };
 
 /**

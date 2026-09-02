@@ -13,7 +13,8 @@ import { usePathname } from 'next/navigation';
  */
 
 const ROUTES = [
-  { href: '/', label: 'Overview' },
+  { href: '/', label: 'Home' },
+  { href: '/overview', label: 'Overview' },
   { href: '/exceptions', label: 'Exception queue' },
   { href: '/inbox', label: 'Customer inbox' },
   { href: '/audit', label: 'Audit trail' },
