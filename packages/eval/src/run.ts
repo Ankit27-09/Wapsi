@@ -92,6 +92,18 @@ async function main(): Promise<void> {
         `  ${arm.id.padEnd(4)} ${arm.label.padEnd(24)} ` +
           `${run.fired} fired · ${run.refused} refused · ${run.succeeded} recovered\n`,
       );
+
+      // A halted batch is a RESULT, not a crash — the transactions already decided stand.
+      // Reported loudly here because the alternative is a run that silently diagnosed half
+      // its population and reported the total as though it had done all of it.
+      if (run.budgetBreach !== null) {
+        process.stdout.write(
+          `       ⛔ HALTED on the model ${run.budgetBreach.rule} after ${run.modelCalls} ` +
+            `call(s), ${formatINR(run.modelSpend)} spent.\n` +
+            `          ${run.budgetBreach.detail}\n` +
+            `          Undiagnosed transactions were left to a human, not guessed at.\n`,
+        );
+      }
     }
 
     process.stdout.write('\n');

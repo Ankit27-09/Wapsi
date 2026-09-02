@@ -540,7 +540,7 @@ Diagrams: [`ARCHITECTURE.md`](ARCHITECTURE.md). Build history:
 pnpm verify   # typecheck + lint + boundaries + tests
 ```
 
-**100 tests, 9 files.** 20 skip cleanly with an explanation when Docker is not running rather
+**138 tests, 12 files.** 20 skip cleanly with an explanation when Docker is not running rather
 than failing with a wall of connection errors.
 
 [`FAILURES.md`](FAILURES.md) records the bugs that mattered — what broke, how it was found, and

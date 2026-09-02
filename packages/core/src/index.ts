@@ -13,6 +13,14 @@
 export { type Brand, assertNever } from './brand.js';
 
 export {
+  type BudgetBreach,
+  type BudgetLimits,
+  type ModelBudget,
+  type Reservation,
+  createModelBudget,
+} from './budget.js';
+
+export {
   type Paise,
   type Bps,
   BPS_ONE,

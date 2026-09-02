@@ -6,6 +6,7 @@ import { loadTruthModel } from '@rc/simulator';
 import { applyChanges } from './apply-policy.js';
 import { armById } from './arms.js';
 import { gatherEvidence } from './evidence.js';
+import { authorise } from './operator.js';
 import {
   decide,
   loadAwaiting,
@@ -41,6 +42,7 @@ interface Args {
   readonly reject: number | null;
   readonly note: string;
   readonly operator: string;
+  readonly token: string | undefined;
 }
 
 function parseArgs(argv: readonly string[]): Args {
@@ -71,7 +73,29 @@ function parseArgs(argv: readonly string[]): Args {
     reject: asId('reject'),
     note: flags.get('note') ?? '',
     operator: flags.get('operator') ?? 'human:operator',
+    // Falls back to the environment so a shell that already exports it does not have to
+    // repeat it on the command line — and so the secret stays out of shell history.
+    token: flags.get('token') ?? process.env['OPERATOR_TOKEN_PRESENTED'],
   };
+}
+
+/**
+ * Halt unless the caller holds the operator secret.
+ *
+ * Exits rather than throwing, so an unauthorised attempt produces the instruction the reader
+ * needs instead of a stack trace with the reason buried in it.
+ */
+function requireOperator(args: Args, action: string): void {
+  const auth = authorise({ presented: args.token, operator: args.operator });
+  if (auth.ok) return;
+
+  process.stderr.write(
+    `\n  REFUSED — not authorised to ${action}.\n\n    ${auth.problem}\n\n` +
+      `  This gate exists because the whole safety argument of this loop is "the agent\n` +
+      `  proposes, a human decides". Without a credential that is a convention, not a\n` +
+      `  control: the audit row would say a human approved and be unable to establish it.\n\n`,
+  );
+  process.exit(1);
 }
 
 function describe(policy: Policy, stored: StoredProposal): string {
@@ -201,6 +225,11 @@ async function generate(db: Db, args: Args, policy: Policy): Promise<void> {
 }
 
 async function approve(db: Db, args: Args, policy: Policy, id: number): Promise<void> {
+  // AUTHORISED BEFORE ANYTHING IS READ OR EVALUATED. Checking after the held-out run would
+  // mean an unauthorised caller could still make the system spend a minute of compute and
+  // print the result of a change they were not permitted to make.
+  requireOperator(args, `approve proposal ${id}`);
+
   const proposal = await loadById(db, id);
   if (proposal === null) throw new Error(`No proposal ${id}. Run \`pnpm propose\` first.`);
   if (proposal.status !== 'awaiting') {
@@ -249,6 +278,11 @@ async function approve(db: Db, args: Args, policy: Policy, id: number): Promise<
 }
 
 async function reject(db: Db, args: Args, policy: Policy, id: number): Promise<void> {
+  // A rejection is gated too, and that is not symmetry for its own sake. An unauthorised
+  // party who could reject proposals could suppress every improvement the agent found while
+  // leaving an audit trail that says a human considered and declined each one.
+  requireOperator(args, `reject proposal ${id}`);
+
   const proposal = await loadById(db, id);
   if (proposal === null) throw new Error(`No proposal ${id}.`);
 

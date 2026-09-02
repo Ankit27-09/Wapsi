@@ -78,7 +78,7 @@ flowchart TD
     end
 
     subgraph persistence["persistence"]
-        DB["<b>@rc/db</b><br/>schema · 12 migrations<br/>typed client · triggers"]
+        DB["<b>@rc/db</b><br/>schema · 13 migrations<br/>typed client · triggers"]
     end
 
     subgraph decide["the deciding half"]
@@ -411,7 +411,7 @@ Migration 008 exists for that reason.
 
 ## 8. Data model
 
-Nineteen tables and one derived view, across twelve migrations. The relationships that matter:
+Nineteen tables and one derived view, across thirteen migrations. The relationships that matter:
 
 ```mermaid
 erDiagram
@@ -730,10 +730,18 @@ flowchart TB
 | Live payments | A `rzp_live_` key **fails validation**. Unrepresentable, not discouraged. |
 | Audit tampering | Postgres triggers, `TRUNCATE` included. |
 | Rogue policy change | Unsafe fields absent from the proposal type. |
+| Runaway model spend | A call and cost ceiling checked **before** each call. Breach halts the batch and writes an audit row as `actor = 'cost_ceiling'`. |
+| Unauthorised policy approval | `--approve` and `--reject` require `OPERATOR_TOKEN`, compared in constant time. The published placeholder is refused by name. |
 
-**Two controls are documented in `.env.example` and not yet implemented** —
-`OPERATOR_TOKEN` and the LLM cost ceilings. They are named here rather than left for a reader
-to discover, because a claimed control that does not exist is worse than an absent one.
+**On the last two.** Both were documented in `.env.example` and enforced nowhere — read by
+zero lines of code. That is worse than an absent control, because a claimed one that does not
+exist gives a reader reason to doubt the ones that do. They are now real, tested, and the
+ceiling's audit row required widening the `audit.actor` vocabulary by one member, since a
+budget is genuinely not the policy engine, the worker, or a human.
+
+**What the operator gate is not:** identity, non-repudiation, or per-operator access control.
+A shared secret establishes that whoever ran the command held the secret. Real deployment
+wants SSO and per-operator keys.
 
 ---
 

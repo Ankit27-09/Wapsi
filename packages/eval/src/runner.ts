@@ -5,6 +5,11 @@ import {
   addHours,
   traceId as brandTraceId,
   txnId as brandTxnId,
+  createModelBudget,
+  paise,
+  type BudgetBreach,
+  type ModelBudget,
+  type Paise,
   type ReasonCode,
 } from '@rc/core';
 import type { Arm as ArmId, Db } from '@rc/db';
@@ -122,6 +127,15 @@ export interface RunOptions {
    * difference is what imperfect classification costs, in rupees.
    */
   readonly classify?: RunClassifier;
+  /**
+   * Hard ceiling on model calls and model spend for this batch.
+   *
+   * Defaults to the environment, which defaults in turn to the documented figures — so the
+   * ceiling is in force whether or not a caller thought about it. Every other cost in this
+   * system is bounded by something structural; before this existed, model spend was bounded
+   * only by the size of the batch, which is not a budget.
+   */
+  readonly budget?: ModelBudget;
 }
 
 export interface RunResult {
@@ -144,6 +158,16 @@ export interface RunResult {
    * and the other wastes a fee.
    */
   readonly misclassified: number;
+  /**
+   * Set when a model ceiling halted the batch, naming which one.
+   *
+   * Reported rather than thrown, because a halted batch is a RESULT — the transactions
+   * already decided are real and their audit rows stand. Throwing would discard the partial
+   * work and, worse, make the ceiling look like a crash rather than a control functioning.
+   */
+  readonly budgetBreach: { readonly rule: BudgetBreach; readonly detail: string } | null;
+  readonly modelCalls: number;
+  readonly modelSpend: Paise;
 }
 
 export async function runArm(options: RunOptions): Promise<RunResult> {
@@ -259,6 +283,9 @@ export async function runArm(options: RunOptions): Promise<RunResult> {
   await ensureReasonCodesSeeded(db);
 
   const classify = options.classify ?? ORACLE_CLASSIFY;
+  const budget = options.budget ?? loadModelBudget();
+  let budgetBreach: { readonly rule: BudgetBreach; readonly detail: string } | null = null;
+
   let quarantined = 0;
   let misclassified = 0;
 
@@ -272,21 +299,45 @@ export async function runArm(options: RunOptions): Promise<RunResult> {
   // Classified ONCE per transaction, not per attempt. A retry does not re-diagnose the
   // original failure, and re-classifying would multiply model cost by attempt count while
   // producing the same answer.
+  //
+  // THE CEILING IS CHECKED BEFORE EACH CALL, not after. Recording an overspend and then
+  // stopping would be an audit trail of exactly the thing the ceiling exists to prevent.
+  //
+  // A breached transaction is left UNCLASSIFIED rather than given a guessed label. It then
+  // reaches the planner as `unknown`, whose policy entry permits no attempts and escalates —
+  // so a batch that runs out of model budget degrades into "hand the rest to a human", which
+  // is the correct behaviour and one the system already had a path for.
   const classified = await mapBounded(txns, CLASSIFY_CONCURRENCY, async (row) => {
     const trueCode = trueReasonCode(row.raw);
-    return {
-      row,
+
+    const reservation = budget.reserve();
+    if (reservation.kind === 'breach') {
+      budgetBreach ??= { rule: reservation.rule, detail: reservation.detail };
+      return { row, trueCode, classification: null };
+    }
+
+    const classification = await classify(
+      { description: row.gateway_description, gatewayCode: row.gateway_code },
       trueCode,
-      classification: await classify(
-        { description: row.gateway_description, gatewayCode: row.gateway_code },
-        trueCode,
-      ),
-    };
+    );
+
+    // Only a real model call is charged. The keyword and oracle arms are free and instant,
+    // and counting them would exhaust a budget nothing was spending.
+    if (classification.model !== null && classification.model !== 'oracle') {
+      budget.settle(classification.costPaise);
+    }
+
+    return { row, trueCode, classification };
   });
 
   // Persisted in input order, after the concurrent phase, so the rows land deterministically
   // however the calls happened to complete.
   for (const item of classified) {
+    // Unclassified because the ceiling stopped it. No classification row is written: the
+    // transaction was never diagnosed, and recording a `quarantined` row would claim a
+    // model looked at it and declined, which is a different fact.
+    if (item.classification === null) continue;
+
     await recordClassification(db, {
       txnId: item.row.id,
       batchId: batch.id,
@@ -299,8 +350,23 @@ export async function runArm(options: RunOptions): Promise<RunResult> {
     if (item.classification.reasonCode !== item.trueCode) misclassified += 1;
   }
 
+  if (budgetBreach !== null) {
+    await recordBudgetHalt(db, {
+      batchId: batch.id,
+      arm: options.arm,
+      world,
+      breach: budgetBreach,
+      budget,
+      at: simulatedBatchEnd(txns),
+    });
+  }
+
   // ---- phase 2: decide, strictly sequentially ------------------------------
   for (const { row, classification } of classified) {
+    // Nothing was diagnosed, so nothing may be decided. This is the degradation the ceiling
+    // is for: the batch stops spending rather than acting on a cause nobody identified.
+    if (classification === null) continue;
+
     const txnId = brandTxnId(row.id);
 
     // The classifier's answer, not the truth. This single substitution is what turns the
@@ -448,6 +514,9 @@ export async function runArm(options: RunOptions): Promise<RunResult> {
     succeeded,
     quarantined,
     misclassified,
+    budgetBreach,
+    modelCalls: budget.calls,
+    modelSpend: budget.spent,
   };
 }
 
@@ -509,6 +578,74 @@ async function recordClassification(
       ok: c.error === null,
       error: c.error,
       created_at: args.at,
+    })
+    .execute();
+}
+
+/**
+ * The model ceiling, from the environment.
+ *
+ * Defaulted rather than required, and defaulted to the figures `.env.example` documents — so
+ * the ceiling is in force whether or not the operator set the variable, and a run with no
+ * `.env` is protected rather than unprotected. A safety control that only exists when
+ * somebody remembers to configure it is a suggestion.
+ */
+export function loadModelBudget(env: NodeJS.ProcessEnv = process.env): ModelBudget {
+  const calls = Number.parseInt(env['MAX_LLM_CALLS_PER_BATCH'] ?? '1200', 10);
+  const cost = Number.parseInt(env['MAX_LLM_COST_PAISE_PER_BATCH'] ?? '200000', 10);
+
+  if (!Number.isInteger(calls) || calls < 0) {
+    throw new RangeError(
+      `MAX_LLM_CALLS_PER_BATCH must be a non-negative integer, got ` +
+        `${JSON.stringify(env['MAX_LLM_CALLS_PER_BATCH'])}`,
+    );
+  }
+  if (!Number.isInteger(cost) || cost < 0) {
+    throw new RangeError(
+      `MAX_LLM_COST_PAISE_PER_BATCH must be a non-negative integer, got ` +
+        `${JSON.stringify(env['MAX_LLM_COST_PAISE_PER_BATCH'])}`,
+    );
+  }
+
+  return createModelBudget({ maxCalls: calls, maxCostPaise: paise(BigInt(cost)) });
+}
+
+/**
+ * Write the halt to the audit trail.
+ *
+ * The ceiling firing is an event with consequences — transactions went undiagnosed — so it
+ * belongs in the same append-only trail as every decision, not in a log line that scrolls
+ * away. `actor` is `cost_ceiling` rather than `policy_engine`, because the policy engine did
+ * not make this call; a budget did, and an operator reading the trail should be able to tell
+ * those apart.
+ */
+async function recordBudgetHalt(
+  db: Db,
+  args: {
+    readonly batchId: string;
+    readonly arm: ArmId;
+    readonly world: string;
+    readonly breach: { readonly rule: BudgetBreach; readonly detail: string };
+    readonly budget: ModelBudget;
+    readonly at: Date;
+  },
+): Promise<void> {
+  await db
+    .insertInto('audit')
+    .values({
+      trace_id: `${args.arm}:${args.world}:budget`,
+      batch_id: args.batchId,
+      event_type: 'batch.halted_on_model_budget',
+      actor: 'cost_ceiling',
+      rationale: args.breach.detail,
+      payload: JSON.stringify({
+        rule: args.breach.rule,
+        calls: args.budget.calls,
+        spent_paise: args.budget.spent.toString(),
+        max_calls: args.budget.limits.maxCalls,
+        max_cost_paise: args.budget.limits.maxCostPaise.toString(),
+      }),
+      occurred_at: args.at,
     })
     .execute();
 }
