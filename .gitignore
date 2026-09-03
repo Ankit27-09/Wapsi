@@ -29,3 +29,7 @@ Thumbs.db
 .vscode/*
 !.vscode/settings.json
 !.vscode/extensions.json
+
+# Synthesised call audio. Regenerated on demand from the registered script, so it is
+# build output rather than source — and a WAV is a megabyte a minute.
+apps/web/public/audio/

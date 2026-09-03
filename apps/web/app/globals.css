@@ -799,3 +799,32 @@ code {
 .cure-line { display: block; margin-top: 7px; font-size: 12.5px; }
 .nowrap { white-space: nowrap; }
 .pill.dim { color: var(--ink-faint); border-color: var(--border); }
+
+/* ---------- the call, made audible ----------
+   Only ever rendered on a voice row. Two of 146 sends in a batch, because a call has to
+   clear the NCPR registry, a 10:00–19:00 window and a weekly ceiling before the
+   expected-value gate prices it at ~22× an SMS. */
+
+/* The text that was actually spoken, distinct from the template above it. A left rule rather
+   than a box: it is a continuation of the message cell, not a separate artifact. */
+.msg.spoken {
+  border-left: 2px solid var(--accent);
+  padding-left: 11px;
+  color: var(--ink);
+  font-style: normal;
+}
+
+.call-audio { display: flex; flex-direction: column; gap: 7px; margin-top: 10px;
+              align-items: flex-start; }
+
+.call-btn { padding: 7px 15px; font-size: 12.5px; border-color: var(--accent-edge);
+            color: var(--accent-lit); }
+.call-btn:disabled { opacity: 0.62; cursor: progress; }
+
+/* Native controls, restrained to the palette. Chrome renders its own widget, so this can only
+   set the frame and the ground it sits on — which is enough to stop it looking pasted in. */
+.call-player { height: 34px; width: 300px; max-width: 100%;
+               border-radius: 999px; background: var(--surface-2); }
+
+.call-note { font-size: 11px; color: var(--ink-faint); line-height: 1.4; }
+.call-error { font-size: 11.5px; color: var(--bad); line-height: 1.45; max-width: 56ch; }

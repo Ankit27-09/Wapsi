@@ -41,6 +41,9 @@ importers:
       '@rc/policy':
         specifier: workspace:*
         version: link:../../packages/policy
+      '@rc/voice':
+        specifier: workspace:*
+        version: link:../../packages/voice
       next:
         specifier: ^15.1.3
         version: 15.5.24(@types/node@22.20.1)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)

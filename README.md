@@ -560,7 +560,7 @@ pnpm verify   # typecheck + lint + boundaries + tests
 explanation when Docker is not running, rather than failing with a wall of connection errors.
 
 [`FAILURES.md`](FAILURES.md) records the bugs that mattered — what broke, how it was found, and
-what it cost. Twenty-four entries. **Seven of them inflated this system's own reported
+what it cost. Twenty-six entries. **Seven of them inflated this system's own reported
 results**, and one did something worse: it disabled a guarantee that exists to prevent exactly
 that kind of error. Those are marked, because a bug that flatters the author is the one a
 reader most needs to know was looked for. Several were found by a robustness check rather than

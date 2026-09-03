@@ -1,6 +1,8 @@
 import { formatINR } from '@rc/core';
 import { loadBlockedContacts, loadInbox, seedFrom } from '../../lib/queries';
+import { renderSend } from '../../lib/script';
 import { SeedPicker } from '../seed-picker';
+import { CallAudio } from './call-audio';
 
 /**
  * What customers actually received — and, beside it, what the system refused to send.
@@ -18,6 +20,18 @@ export default async function Inbox({
   const seed = seedFrom((await searchParams).seed);
   const [messages, blocked] = await Promise.all([loadInbox(seed), loadBlockedContacts(seed)]);
   const hinglish = messages.filter((m) => m.language === 'hi_latn').length;
+  const voiceSends = messages.filter((m) => m.channel === 'voice');
+
+  // Rendered here rather than in the loader, and through the SAME function the Server Action
+  // uses, so the text on screen is the text that gets synthesised. `rendered_body` in the
+  // database is a stub — see lib/script.ts.
+  const calls = (
+    await Promise.all(
+      voiceSends.map(async (send) => ({ send, script: await renderSend(send.id) })),
+    )
+  ).filter((entry): entry is { send: typeof entry.send; script: NonNullable<typeof entry.script> } =>
+    entry.script !== null,
+  );
 
   return (
     <>
@@ -44,6 +58,16 @@ export default async function Inbox({
           <div className="value">{hinglish}</div>
           <div className="note">
             {messages.length === 0 ? '—' : `${Math.round((hinglish / messages.length) * 100)}% of sends`}
+          </div>
+        </div>
+        <div className="tile">
+          <div className="label">Calls placed</div>
+          <div className="value">{calls.length}</div>
+          {/* The scarcity is the result, not a shortfall. Voice costs ~22× an SMS and has to
+              clear the NCPR registry, a narrower window and a weekly ceiling before the gate
+              prices it at all — so it wins rarely, and that is the gate working. */}
+          <div className="note">
+            {messages.length === 0 ? '—' : `of ${messages.length} sends · ~22× the cost`}
           </div>
         </div>
         <div className="tile">
@@ -77,6 +101,68 @@ export default async function Inbox({
         </>
       )}
 
+      {calls.length > 0 && (
+        <>
+          <h3>Calls placed — {calls.length} of {messages.length} sends</h3>
+          <p className="section-note">
+            Pulled out of the chronological list below, because two rows in a hundred and
+            forty-six are hard to find and these are the ones worth hearing. Voice is not a
+            louder SMS: it costs about <strong>22× as much</strong>, is blocked outright by
+            the NCPR/DND registry regardless of merchant consent, is confined to a
+            10:00–19:00 window narrower than quiet hours, and is capped at one call per
+            customer per week. It only reaches the expected-value gate after all of that —
+            which is why it wins twice and not two hundred times.
+          </p>
+
+          <div className="wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Customer</th>
+                  <th>What was said, and heard</th>
+                  <th>Template</th>
+                  <th>Lang</th>
+                  <th>Cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {calls.map(({ send, script }) => (
+                  <tr key={send.id} data-highlight="true">
+                    <td>{send.customer}</td>
+                    <td style={{ textAlign: 'left' }}>
+                      {/* The registered template with this transaction's real amount and age
+                          filled in. The audio speaks this exact string, because both come
+                          from `renderSend`. */}
+                      <div className="msg spoken">{script.text}</div>
+                      <CallAudio sendId={send.id} seconds={estimateSeconds(script.text)} />
+                    </td>
+                    <td className="mono dim" style={{ verticalAlign: 'top' }}>
+                      {send.templateId}
+                    </td>
+                    <td style={{ verticalAlign: 'top' }}>
+                      <span className={send.language === 'hi_latn' ? 'pill accent' : 'pill'}>
+                        {send.language === 'hi_latn' ? 'Hinglish' : 'EN'}
+                      </span>
+                    </td>
+                    <td style={{ verticalAlign: 'top' }}>{formatINR(send.costPaise)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="callout">
+            <strong>The script is registered, and the model only speaks it.</strong> Each
+            body above comes from a <code className="mono">message_template</code> row with a
+            DLT id and <code className="mono">status = registered</code>; the engine filled
+            its declared variables with this transaction&rsquo;s real amount and age. Speech
+            synthesis reads the result verbatim and composes nothing — stricter than the SMS
+            path deliberately, because a wrong message can be read and disputed afterwards
+            while a call is gone the moment it ends.
+          </div>
+        </>
+      )}
+
       <h3>Delivered</h3>
       {messages.length === 0 ? (
         <div className="empty">
@@ -102,6 +188,9 @@ export default async function Inbox({
                     <div className="msg" style={{ marginTop: 6 }}>
                       {message.body}
                     </div>
+                    {/* The two voice rows carry their player in the section above rather
+                        than here, so the control is findable instead of buried at row 130 of
+                        146. This table stays strictly chronological. */}
                   </td>
                   <td className="mono dim" style={{ verticalAlign: 'top' }}>
                     {message.templateId}
@@ -138,4 +227,17 @@ export default async function Inbox({
       </div>
     </>
   );
+}
+
+/**
+ * Rough spoken duration, so the button can say what it is about to produce.
+ *
+ * Announced BEFORE synthesis, which means it cannot come from the audio — it is an estimate
+ * from character count at roughly 13 characters a second, measured against the one real
+ * render: 292 characters produced 21.2 seconds. Labelled with a "~" because an estimate
+ * presented as a measurement is the kind of small dishonesty this project spends most of its
+ * comments arguing against.
+ */
+function estimateSeconds(text: string): number {
+  return Math.max(1, Math.round(text.length / 13.8));
 }

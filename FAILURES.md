@@ -9,7 +9,7 @@ is the argument for having them.
 
 Two markers, because they are different kinds of bad:
 
-- **▲** — the bug **inflated this system's own reported results**. Seven of them (1–7). A bug
+- **▲** — the bug **inflated this system's own reported results**. Eight of them (1–7 and 25). A bug
   that flatters the author is the one a reader most needs to know was looked for.
 - **▲▲** — the bug **disabled a guarantee that exists to prevent an inflated result**. One
   of them (20), and it is one level worse, because it removes the thing that would have caught
@@ -613,6 +613,72 @@ two rows exactly in phase — verified against the rendered DOM rather than by e
 `:nth-of-type(3)` rule meant to rotate the row-ending connector was also removed:
 `nth-of-type` counts among siblings of the same element type, and every child there is a
 `div`, so it was rotating an arbitrary arrow.
+
+---
+
+## 25. ▲ The inbox showed six strategies at once and called it one
+
+**Symptom.** A newly added "Calls placed" tile read **0 of 120 sends** when the batch had
+placed two calls. The tile was correct about the list it was given.
+
+**How it was found.** By putting audio controls on voice rows and finding none to attach to.
+
+**What was happening.** Two independent faults, stacked.
+
+`loadInbox` joined `batch` on **seed and world only**. Every arm runs the same population
+under `world = 'base'`, so the query returned the union of all of them: 146 sends from the
+controller, 289 from the oracle, and 540 from the blast-everything baseline. Nearly a
+thousand rows, presented under the heading *"what customers actually received"* — including
+messages from an arm that cannot ship and a strawman built to lose.
+
+Then `.limit(120)` truncated that union, and the tiles above the table counted the truncated
+list. Voice is the **escalation** step, so it arrives late in a ladder; both calls fell past
+the cutoff. The page was describing its own first page as the whole run, with no indication
+it had stopped early.
+
+**Why it was expensive.** The Hinglish and Blocked percentages on that page were computed
+over a mixed, truncated population, which makes them numbers about nothing. It also meant the
+compliance story the page exists to tell — *this is what the system sent, and this is what it
+refused* — was being told about six systems simultaneously.
+
+**What prevents it.** `where('batch.arm', '=', 'rc')`, and the cap raised to a named
+`INBOX_LIMIT` well clear of a batch's real volume. The lesson is the same one as entry 20: a
+query that joins on *part* of a key returns something plausible rather than nothing, which is
+why it survived.
+
+---
+
+## 26. `message_send.rendered_body` never contained a message
+
+**Symptom.** None, until audio needed the text. Synthesising a call read out
+`[template tpl_ar_voice_final_hi_v1]`.
+
+**What was happening.** `execute.ts` writes exactly that string, with a comment saying
+*"Variable filling lands with the renderer"* — a deferral that was never closed. So the column
+records **which** template was sent and does not record **what** was sent.
+
+**Why it matters more than it looks.** This project's compliance argument rests on an
+append-only trail of what reached each customer. A column named `rendered_body` that contains
+a template id is not that: it establishes an approved template was referenced, which is a
+weaker claim than the schema's own naming implies. The `variables` column is `{}` for the
+same reason, so the values are not recoverable from the record either.
+
+**What is true instead.** The claim the system *can* defend is narrower and still strong:
+`message_send.template_id` is NOT NULL against a row with `status = 'registered'` and a DLT
+id, so there is no path by which free-form model output could be sent. What is missing is the
+filled text, not the guarantee.
+
+**Current state, stated rather than hidden.** The console renders the script for display and
+for speech through one function — the same registered template the engine referenced, filled
+with the same transaction values the engine had. It invents nothing, and it is a *viewer
+reconstructing* the message rather than reading it back.
+
+**Not fixed here, deliberately.** The correct fix is upstream: the engine fills the variables
+it already has in scope and stores the result. That is a change to `execute.ts`, which
+carries the idempotency and dual-write protocol, and it was found the day before a submission
+deadline. Changing the most safety-critical file in the system under time pressure is how a
+working demo becomes a broken one — so the gap is recorded, the workaround is documented at
+its two call sites, and the fix is the first thing after.
 
 ---
 

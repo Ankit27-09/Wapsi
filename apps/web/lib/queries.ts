@@ -318,9 +318,25 @@ export interface InboxRow {
   readonly templateId: string;
   readonly dltId: string | null;
   readonly body: string;
+  /**
+   * The text actually sent, variables filled.
+   *
+   * Distinct from `body`, which is the registered template with its `{{placeholders}}` — the
+   * page shows that to prove the message came from an approved template rather than from a
+   * model. This is what the customer received, and it is what the audio speaks.
+   */
+  readonly renderedBody: string;
   readonly costPaise: Paise;
   readonly sentAt: Date;
 }
+
+/**
+ * Most sends a batch is expected to produce, with headroom.
+ *
+ * A cap exists so a pathological run cannot render fifty thousand rows into a page. It is
+ * NOT a page size: when it binds, the page says so.
+ */
+export const INBOX_LIMIT = 500;
 
 /** What customers actually received, and through which registered template. */
 export async function loadInbox(seed: number): Promise<readonly InboxRow[]> {
@@ -338,13 +354,31 @@ export async function loadInbox(seed: number): Promise<readonly InboxRow[]> {
       'message_send.template_id as template_id',
       'message_template.dlt_template_id as dlt_template_id',
       'message_template.body as body',
+      'message_send.rendered_body as rendered_body',
       'message_send.cost_paise as cost_paise',
       'message_send.sent_at as sent_at',
     ])
     .where('batch.seed', '=', seed)
     .where('batch.world', '=', WORLD)
+    // THE CONTROLLER'S SENDS ONLY, and leaving this out mixed six strategies into one list.
+    //
+    // Every arm runs the same population under `world = 'base'`, so joining on seed and
+    // world alone returned the union: 146 sends from `rc`, 289 from the oracle and 540 from
+    // the blast-everything baseline. Nearly a thousand rows presented as "what customers
+    // actually received" — including messages from an arm that cannot ship and a strawman
+    // built to lose. The tiles counted that union, and the page truncated it silently.
+    .where('batch.arm', '=', 'rc')
     .orderBy('message_send.sent_at', 'asc')
-    .limit(120)
+    // 500 rather than 120, and the tiles above the table were counting the TRUNCATED list.
+    //
+    // A batch sends about 146 messages, so 120 cut off the tail — and voice is the
+    // escalation step, which arrives late in a ladder. Both calls fell past the cutoff, so
+    // "Calls placed" read 0 when the answer was 2. The page was quietly describing its own
+    // first page as the whole run.
+    //
+    // `INBOX_LIMIT` is exported so the page can say when it has truncated instead of
+    // silently showing a prefix.
+    .limit(INBOX_LIMIT)
     .execute();
 
   return rows.map((row) => ({
@@ -355,6 +389,7 @@ export async function loadInbox(seed: number): Promise<readonly InboxRow[]> {
     templateId: row.template_id,
     dltId: row.dlt_template_id,
     body: row.body,
+    renderedBody: row.rendered_body,
     costPaise: PaiseSchema.parse(row.cost_paise),
     sentAt: row.sent_at,
   }));
