@@ -30,7 +30,8 @@
     "web": "pnpm --filter @rc/web dev",
     "web:build": "pnpm build && pnpm --filter @rc/web build",
     "verify": "pnpm typecheck && pnpm lint && pnpm lint:boundaries && pnpm test",
-    "razorpay": "pnpm build && node --env-file-if-exists=.env packages/razorpay/dist/cli.js"
+    "razorpay": "pnpm build && node --env-file-if-exists=.env packages/razorpay/dist/cli.js",
+    "voice": "pnpm build && node --env-file-if-exists=.env packages/voice/dist/cli.js"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

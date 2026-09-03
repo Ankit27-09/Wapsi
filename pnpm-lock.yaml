@@ -195,6 +195,15 @@ importers:
         specifier: ^3.23.2
         version: 3.23.2
 
+  packages/voice:
+    dependencies:
+      '@rc/core':
+        specifier: workspace:*
+        version: link:../core
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
+
 packages:
 
   '@emnapi/runtime@1.11.3':

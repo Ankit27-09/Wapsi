@@ -1,0 +1,24 @@
+{
+  "name": "@rc/voice",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Speech synthesis for registered Hinglish call scripts. Renders an approved template to audio; never composes what a customer hears.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@rc/core": "workspace:*",
+    "zod": "^3.24.1"
+  }
+}
