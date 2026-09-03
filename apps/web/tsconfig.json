@@ -41,6 +41,12 @@
   "references": [
     {
       "path": "../../packages/voice"
+    },
+    {
+      "path": "../../packages/mail"
+    },
+    {
+      "path": "../../packages/razorpay"
     }
   ]
 }

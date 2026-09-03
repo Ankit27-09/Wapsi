@@ -27,6 +27,9 @@
       "path": "packages/eval"
     },
     {
+      "path": "packages/mail"
+    },
+    {
       "path": "packages/voice"
     },
     {

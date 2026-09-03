@@ -24,6 +24,7 @@ export {
   createLink,
   ensureLink,
   findLinkByReference,
+  toReference,
   linkBody,
   type LinkRequest,
   type LinkResponse,

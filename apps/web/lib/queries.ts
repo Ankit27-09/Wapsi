@@ -328,6 +328,16 @@ export interface InboxRow {
   readonly renderedBody: string;
   readonly costPaise: Paise;
   readonly sentAt: Date;
+  /**
+   * The action this send belonged to.
+   *
+   * Carried so the page can offer email dispatch on `payment_link` rows only — the one
+   * action whose entire mechanism IS a link the customer opens. Everything else is a nudge
+   * beside a charge, and mailing one would be inventing an outreach the engine never chose.
+   */
+  readonly plannedAction: string;
+  /** The transaction's amount, for the dispatch button's label. */
+  readonly amount: Paise;
 }
 
 /**
@@ -346,8 +356,11 @@ export async function loadInbox(seed: number): Promise<readonly InboxRow[]> {
     .innerJoin('batch', 'batch.id', 'decision.batch_id')
     .innerJoin('customer', 'customer.id', 'message_send.customer_id')
     .innerJoin('message_template', 'message_template.id', 'message_send.template_id')
+    .innerJoin('txn', 'txn.id', 'decision.txn_id')
     .select([
       'message_send.id as id',
+      'decision.planned_action as planned_action',
+      'txn.amount_paise as amount_paise',
       'customer.display_name as customer',
       'customer.preferred_language as language',
       'message_send.channel as channel',
@@ -390,6 +403,8 @@ export async function loadInbox(seed: number): Promise<readonly InboxRow[]> {
     dltId: row.dlt_template_id,
     body: row.body,
     renderedBody: row.rendered_body,
+    plannedAction: row.planned_action,
+    amount: PaiseSchema.parse(row.amount_paise),
     costPaise: PaiseSchema.parse(row.cost_paise),
     sentAt: row.sent_at,
   }));

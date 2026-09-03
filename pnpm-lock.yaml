@@ -38,9 +38,15 @@ importers:
       '@rc/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@rc/mail':
+        specifier: workspace:*
+        version: link:../../packages/mail
       '@rc/policy':
         specifier: workspace:*
         version: link:../../packages/policy
+      '@rc/razorpay':
+        specifier: workspace:*
+        version: link:../../packages/razorpay
       '@rc/voice':
         specifier: workspace:*
         version: link:../../packages/voice
@@ -150,6 +156,15 @@ importers:
       '@rc/simulator':
         specifier: workspace:*
         version: link:../simulator
+
+  packages/mail:
+    dependencies:
+      '@rc/core':
+        specifier: workspace:*
+        version: link:../core
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
 
   packages/policy:
     dependencies:

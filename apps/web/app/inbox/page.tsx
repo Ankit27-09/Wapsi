@@ -3,6 +3,7 @@ import { loadBlockedContacts, loadInbox, seedFrom } from '../../lib/queries';
 import { renderSend } from '../../lib/script';
 import { SeedPicker } from '../seed-picker';
 import { CallAudio } from './call-audio';
+import { DispatchMail } from './dispatch-mail';
 
 /**
  * What customers actually received — and, beside it, what the system refused to send.
@@ -191,6 +192,12 @@ export default async function Inbox({
                     {/* The two voice rows carry their player in the section above rather
                         than here, so the control is findable instead of buried at row 130 of
                         146. This table stays strictly chronological. */}
+                    {message.plannedAction === 'payment_link' ? (
+                      <DispatchMail
+                        sendId={message.id}
+                        amount={formatINR(message.amount)}
+                      />
+                    ) : null}
                   </td>
                   <td className="mono dim" style={{ verticalAlign: 'top' }}>
                     {message.templateId}
