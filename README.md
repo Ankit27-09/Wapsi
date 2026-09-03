@@ -556,7 +556,7 @@ Diagrams: [`ARCHITECTURE.md`](ARCHITECTURE.md). Build history:
 pnpm verify   # typecheck + lint + boundaries + tests
 ```
 
-**250 tests, 17 files.** 21 of them talk to a live Postgres and skip cleanly with an
+**258 tests, 17 files.** 21 of them talk to a live Postgres and skip cleanly with an
 explanation when Docker is not running, rather than failing with a wall of connection errors.
 
 [`FAILURES.md`](FAILURES.md) records the bugs that mattered — what broke, how it was found, and

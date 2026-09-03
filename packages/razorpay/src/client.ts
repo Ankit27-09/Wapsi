@@ -64,18 +64,97 @@ export interface RequestOptions {
   readonly body?: unknown;
   /** Abort after this many ms. A hung request must not stall a demo indefinitely. */
   readonly timeoutMs?: number;
+  /**
+   * How long to wait before retrying attempt `n`. Tests only — omit for the real schedule.
+   *
+   * The same reason the provider layer in `@rc/ai` takes one: sleeping through a real
+   * backoff to assert on an error added fifteen seconds to a suite, and a suite slow enough
+   * to skip is a suite that stops catching things.
+   */
+  readonly retryDelayMs?: (attempt: number) => number;
 }
 
 const DEFAULT_TIMEOUT_MS = 12_000;
 
+/** Attempts before giving up on a rate limit or a transient server fault. */
+export const MAX_ATTEMPTS = 4;
+
 /**
- * Perform one request and validate the response against `schema`.
+ * Bounded exponential backoff with jitter.
+ *
+ * The jitter is not decoration: two terminals running `pnpm razorpay --live` together would
+ * otherwise retry in lockstep and re-trigger the same throttle that stopped them.
+ */
+export function backoffMs(attempt: number): number {
+  return Math.min(6_000, 700 * 2 ** attempt) + Math.floor(Math.random() * 300);
+}
+
+/**
+ * Whether repeating this request could plausibly succeed.
+ *
+ * A 429 is the one that matters in practice: Razorpay's test API throttles, and a run of
+ * three links hit it on the third. A 400 will fail identically forever, and a duplicate is
+ * not a failure at all — `ensureLink` handles that by looking the link up.
+ */
+function worthRetrying(error: RazorpayError): boolean {
+  if (error.duplicate) return false;
+  return error.status === 429 || error.status >= 500 || error.status === 0;
+}
+
+/**
+ * Retry on a rate limit, and the reason this is SAFE is the whole design.
+ *
+ * Retrying a POST that creates a demand for money is normally reckless — a 429 is ambiguous
+ * about whether the resource was created before the response was refused. Here it is not,
+ * because every create carries `reference_id`, derived from the engine's idempotency key,
+ * and Razorpay enforces uniqueness on it. So a repeat is either accepted (the first never
+ * landed) or rejected as a duplicate (it did), and `ensureLink` resolves the second case by
+ * fetching the existing link. The worst outcome of a retry is a wasted request.
+ *
+ * Without this, one link in three failed on a live run — which is not the system behaving
+ * badly, but it prints `FAILED` and reads as though it were. The provider layer in `@rc/ai`
+ * has had this ladder since the first live ablation; this client did not, and the
+ * inconsistency was an oversight rather than a decision.
+ */
+export async function request<T>(
+  config: RazorpayConfig,
+  options: RequestOptions,
+  schema: z.ZodType<T>,
+): Promise<T> {
+  let last: RazorpayError | null = null;
+
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+    try {
+      return await attemptRequest(config, options, schema);
+    } catch (cause) {
+      if (!(cause instanceof RazorpayError)) throw cause;
+      last = cause;
+      if (!worthRetrying(cause) || attempt === MAX_ATTEMPTS - 1) throw cause;
+
+      const waitMs = (options.retryDelayMs ?? backoffMs)(attempt);
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+  }
+
+  throw (
+    last ??
+    new RazorpayError({
+      status: 0,
+      code: 'NO_ATTEMPT',
+      description: 'The retry loop exited without attempting a request.',
+      duplicate: false,
+    })
+  );
+}
+
+/**
+ * Perform ONE request and validate the response against `schema`.
  *
  * Every branch that can produce a non-response is turned into a `RazorpayError` with a
  * readable message, because the single most likely thing to go wrong during a live demo is
  * the network — and "TypeError: fetch failed" on a projector is not a diagnosis.
  */
-export async function request<T>(
+async function attemptRequest<T>(
   config: RazorpayConfig,
   options: RequestOptions,
   schema: z.ZodType<T>,
@@ -85,6 +164,7 @@ export async function request<T>(
   const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 
   let response: Response;
+  let text: string;
   try {
     response = await fetch(url, {
       method: options.method,
@@ -95,6 +175,11 @@ export async function request<T>(
       ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
       signal: controller.signal,
     });
+    // Inside the try, so the abort signal covers the BODY as well as the headers. It did
+    // not before: `clearTimeout` ran the moment `fetch` resolved, so a stalled body waited
+    // forever with nothing to interrupt it. The identical bug in `@rc/ai` presented as a
+    // batch that hung with zero recorded calls.
+    text = await response.text();
   } catch (cause) {
     const aborted = cause instanceof Error && cause.name === 'AbortError';
     throw new RazorpayError({
@@ -108,8 +193,6 @@ export async function request<T>(
   } finally {
     clearTimeout(timer);
   }
-
-  const text = await response.text();
 
   if (!response.ok) {
     const parsed = ApiErrorSchema.safeParse(safeJson(text));

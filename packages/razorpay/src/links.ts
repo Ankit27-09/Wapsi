@@ -148,13 +148,25 @@ export function linkBody(link: LinkRequest): Record<string, unknown> {
 }
 
 /** Create a payment link. Throws `RazorpayError`; `duplicate` means it already exists. */
+/**
+ * Retry pacing, overridable by tests so they do not sit through a real backoff.
+ *
+ * The same seam the `@rc/ai` provider factories carry, for the same reason: five tests
+ * sleeping through the production ladder added fifteen seconds to the suite, and a suite slow
+ * enough to skip is a suite that stops catching things. Omit it and the real schedule applies.
+ */
+export interface RetryOverride {
+  readonly retryDelayMs?: (attempt: number) => number;
+}
+
 export async function createLink(
   config: RazorpayConfig,
   link: LinkRequest,
+  retry: RetryOverride = {},
 ): Promise<LinkResponse> {
   return request(
     config,
-    { method: 'POST', path: '/payment_links', body: linkBody(link) },
+    { method: 'POST', path: '/payment_links', body: linkBody(link), ...retry },
     LinkResponseSchema,
   );
 }
@@ -170,12 +182,14 @@ export async function createLink(
 export async function findLinkByReference(
   config: RazorpayConfig,
   referenceId: string,
+  retry: RetryOverride = {},
 ): Promise<LinkResponse | null> {
   const list = await request(
     config,
     {
       method: 'GET',
       path: `/payment_links?reference_id=${encodeURIComponent(referenceId)}`,
+      ...retry,
     },
     LinkListSchema,
   );
@@ -193,9 +207,10 @@ export async function findLinkByReference(
 export async function ensureLink(
   config: RazorpayConfig,
   link: LinkRequest,
+  retry: RetryOverride = {},
 ): Promise<{ readonly link: LinkResponse; readonly reused: boolean }> {
   try {
-    return { link: await createLink(config, link), reused: false };
+    return { link: await createLink(config, link, retry), reused: false };
   } catch (cause) {
     // Only a duplicate reference is recoverable here. Anything else — a bad amount, a
     // rejected key, an unreachable host — is rethrown, because turning every failure into
@@ -215,7 +230,7 @@ export async function ensureLink(
     // it" is a genuine contradiction and belongs in the caller's face rather than in a loop.
     for (const waitMs of [0, 600, 1800]) {
       if (waitMs > 0) await sleep(waitMs);
-      const existing = await findLinkByReference(config, link.referenceId);
+      const existing = await findLinkByReference(config, link.referenceId, retry);
       if (existing !== null) return { link: existing, reused: true };
     }
 
