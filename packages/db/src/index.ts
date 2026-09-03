@@ -17,6 +17,7 @@ export type {
   ClassifyMethod,
   ConsentState,
   Database,
+  DegradationVerdict,
   PlannedAction,
   PromiseSource,
   PromiseStatus,
@@ -25,6 +26,8 @@ export type {
   Timing,
   Verdict,
 } from './schema.js';
+
+export { ensureReasonCodesSeeded } from './reference.js';
 
 export {
   type BatchBudget,

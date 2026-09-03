@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { z } from 'zod';
-import { BPS_ONE, ReasonCodeSchema, bps, type Bps, type ReasonCode } from '@rc/core';
+import { BPS_ONE, RailSchema, ReasonCodeSchema, bps, type Bps, type ReasonCode } from '@rc/core';
 import type { Rng } from './rng.js';
 
 /**
@@ -67,12 +67,42 @@ const TruthZeroSchema = z.object({
   scope: z.enum(['charging', 'all']),
 });
 
+/**
+ * A transient degradation episode. The detector's answer key.
+ *
+ * Distinct from an issuer's `multiplier_bps`, which is a permanent quality difference. This
+ * is "for these ninety minutes, this cohort was broken" — a different fact needing a
+ * different response, and the only one a detector can find.
+ */
+const OutageSchema = z.object({
+  issuer_id: z.string().min(1),
+  rail: RailSchema,
+  start_offset_minutes: z.number().int().min(0),
+  duration_minutes: z.number().int().min(1),
+  failure_bps: z.number().int().min(0).max(BPS_ONE),
+  dominant_code: ReasonCodeSchema,
+  /**
+   * Whether a detector SHOULD report this.
+   *
+   * False marks a trap: an elevation that is statistically real and operationally
+   * immaterial. Excluded from the recall set, so missing it is free — and since the scorer
+   * treats any signal matching no material episode as a false positive, reporting it costs
+   * precision. Without this flag the answer key could only reward sensitivity, and a
+   * detector tuned to alert on everything would score perfectly.
+   */
+  material: z.boolean().default(true),
+  note: z.string().min(1),
+});
+
 const TruthFileSchema = z.object({
   version: z.number().int().min(1),
   issuers: z.array(IssuerSchema).min(1),
+  outages: z.array(OutageSchema).default([]),
   structural_zeros: z.array(TruthZeroSchema),
   truth: z.array(TruthRowSchema).min(1),
 });
+
+export type Outage = z.infer<typeof OutageSchema>;
 
 export type Issuer = z.infer<typeof IssuerSchema>;
 
@@ -111,6 +141,15 @@ export interface TruthModel {
 
   /** Weighted issuer choice, for assigning one to a synthetic customer. */
   pickIssuer(rng: Rng): Issuer;
+
+  /**
+   * The degradation episodes this world contains.
+   *
+   * Read by the authorisation-stream generator, which makes them happen, and by the
+   * detection scorer, which grades against them. NEVER by @rc/detect, which has no
+   * dependency on this package.
+   */
+  readonly outages: readonly Outage[];
 }
 
 const key = (code: ReasonCode, attempt: number, timing: TruthTiming, kind: TruthKind): string =>
@@ -182,6 +221,7 @@ export function buildTruthModel(raw: unknown): TruthModel {
       rng.chance(successProbability(code, attempt, timing, issuerId, kind)),
     issuerById,
     pickIssuer: (rng) => rng.weighted(weightedIssuers),
+    outages: parsed.outages,
   };
 }
 

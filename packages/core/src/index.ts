@@ -48,6 +48,8 @@ export {
   ConfidenceSchema,
 } from './money.js';
 
+export { Z_95, Z_99, toBps, wilsonLowerBound } from './stats.js';
+
 export {
   type CustomerId,
   type TxnId,

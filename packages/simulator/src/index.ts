@@ -53,3 +53,14 @@ export {
 } from './gateway.js';
 
 export { ensureTemplatesSeeded, registeredTemplates } from './templates.js';
+
+export {
+  ATTEMPTS_PER_HOUR,
+  STREAM_MINUTES,
+  STREAM_START_MINUTE,
+  materialOutages,
+  planAuthStream,
+  type PlannedAuthAttempt,
+} from './authstream.js';
+
+export type { Outage } from './truth.js';

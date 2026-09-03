@@ -62,6 +62,72 @@ issuers:
     multiplier_bps: 7200
     note: "Small co-operative bank: flaky infrastructure, long outage tails."
 
+# -----------------------------------------------------------------------------
+# Outage episodes
+#
+# TRANSIENT degradations, as distinct from the permanent quality differences above.
+# A multiplier says "this issuer is always a bit worse". An episode says "for these
+# ninety minutes, this issuer on this rail was broken" — and those are different
+# facts needing different responses. You route away from a bad issuer at policy
+# level once; you route away from an outage for as long as it lasts and no longer.
+#
+# THIS IS THE DETECTOR'S ANSWER KEY, AND THE DETECTOR NEVER SEES IT.
+#
+# `@rc/detect` gets the authorisation stream and nothing else. It has no dependency
+# on this package and cannot acquire one — the same wall that stops the policy
+# engine reading these priors. What it produces is then scored against the episodes
+# below for precision, recall and detection delay, which is the only way "the
+# detector works" becomes a measurement rather than a claim.
+#
+# Offsets are minutes from SIM_EPOCH so they land inside the generated span
+# deterministically. `failure_bps` is the collapsed failure rate DURING the episode,
+# against a background of roughly 900 — so these are 4x to 8x events, which is what
+# a real issuer incident looks like rather than a subtle drift.
+# -----------------------------------------------------------------------------
+outages:
+  # A classic issuer incident: the small co-operative bank's card authorisation
+  # falls over mid-morning on day two. Wide, obvious, and the case the detector
+  # must not miss.
+  - issuer_id: ISS_COOP
+    rail: card
+    start_offset_minutes: 1560
+    duration_minutes: 90
+    failure_bps: 7200
+    dominant_code: issuer_down
+    material: true
+    note: "Authorisation host unreachable. Recoverable elsewhere — a rail switch works."
+
+  # A fraud rule, not an outage. Same shape in the data, opposite correct response:
+  # the decline travels with the card rather than the rail, so switching rails is
+  # futile and at volume is how a merchant's acquirer relationship gets reviewed.
+  # Present so the detector is forced to distinguish them rather than calling
+  # everything an outage.
+  - issuer_id: ISS_EAST
+    rail: card
+    start_offset_minutes: 1740
+    duration_minutes: 60
+    failure_bps: 6600
+    dominant_code: suspected_fraud_block
+    material: true
+    note: "Issuer risk engine tightened. Retrying is futile and looks like card testing."
+
+  # A TRAP, marked as one. A real elevation on real volume that is not worth moving
+  # anybody's traffic over: statistically significant, operationally immaterial.
+  #
+  # `material: false` means it is excluded from the recall set, so failing to report
+  # it costs nothing — and because the scorer counts any signal that matches no
+  # material episode as a false positive, reporting it costs precision. A detector
+  # tuned until the demo looked impressive fails here, which is the point of putting
+  # it in the answer key with the opposite sign rather than leaving it out.
+  - issuer_id: ISS_SOUTH
+    rail: card
+    start_offset_minutes: 1860
+    duration_minutes: 45
+    failure_bps: 1800
+    dominant_code: network_timeout
+    material: false
+    note: "Mild elevation. Significant on volume, immaterial in rupees. Must stay unreported."
+
 # `scope: charging` means no re-presentment can succeed, leaving room for a
 # non-charging action that genuinely can. `all` means nothing works at all.
 structural_zeros:

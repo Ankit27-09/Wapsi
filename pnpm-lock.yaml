@@ -99,6 +99,15 @@ importers:
         specifier: ^8.11.10
         version: 8.23.1
 
+  packages/detect:
+    dependencies:
+      '@rc/core':
+        specifier: workspace:*
+        version: link:../core
+      '@rc/db':
+        specifier: workspace:*
+        version: link:../db
+
   packages/engine:
     dependencies:
       '@rc/core':

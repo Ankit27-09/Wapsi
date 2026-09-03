@@ -1,6 +1,4 @@
 import {
-  REASON_CODES,
-  REASON_CODE_META,
   ReasonCodeSchema,
   addHours,
   traceId as brandTraceId,
@@ -12,7 +10,7 @@ import {
   type Paise,
   type ReasonCode,
 } from '@rc/core';
-import type { Arm as ArmId, Db } from '@rc/db';
+import { ensureReasonCodesSeeded, type Arm as ArmId, type Db } from '@rc/db';
 import {
   executeDecision,
   loadAttemptHistory,
@@ -728,25 +726,3 @@ function trueReasonCode(raw: unknown): ReasonCode {
   );
 }
 
-/**
- * Ensure the taxonomy rows exist.
- *
- * The taxonomy is a table rather than an enum so the open-world path can propose new codes
- * at runtime, which means something has to seed the known ones. Idempotent, so it is safe
- * to call before every arm.
- */
-async function ensureReasonCodesSeeded(db: Db): Promise<void> {
-  await db
-    .insertInto('reason_code')
-    .values(
-      REASON_CODES.map((code) => ({
-        code,
-        terminal: REASON_CODE_META[code].terminal,
-        notifiable: REASON_CODE_META[code].notifiable,
-        never_contact: REASON_CODE_META[code].neverContact,
-        note: REASON_CODE_META[code].note,
-      })),
-    )
-    .onConflict((oc) => oc.column('code').doNothing())
-    .execute();
-}

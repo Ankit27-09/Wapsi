@@ -1,0 +1,24 @@
+{
+  "name": "@rc/detect",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Population-level degradation detection over the merchant's authorisation stream. Finds a cohort going bad before any single transaction in it looks unusual.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@rc/core": "workspace:*",
+    "@rc/db": "workspace:*"
+  }
+}

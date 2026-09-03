@@ -48,6 +48,11 @@ export interface Database {
   reason_code: ReasonCodeTable;
   txn: TxnTable;
   promise: PromiseTable;
+
+  /** Detection. The authorisation stream, and what the detector concluded from it. */
+  auth_attempt: AuthAttemptTable;
+  degradation_signal: DegradationSignalTable;
+
   failure_event: FailureEventTable;
   classification: ClassificationTable;
   decision: DecisionTable;
@@ -119,6 +124,15 @@ export type RiskClass =
 
 export type PromiseStatus = 'open' | 'kept' | 'broken' | 'superseded';
 export type PromiseSource = 'sms_reply' | 'voice_call' | 'payment_page' | 'agent_note';
+
+/**
+ * What a detected degradation licenses. Mirrored from the CHECK in `014_degradation.sql`.
+ *
+ * Three rather than one, because the correct response differs: an issuer outage says
+ * re-present elsewhere, a fraud rule says stop presenting at all, and a degraded rail says
+ * the alternatives share the problem so refusing the cohort would halt the whole book.
+ */
+export type DegradationVerdict = 'issuer_outage' | 'fraud_rule' | 'rail_degraded';
 
 /**
  * Timing buckets, mirrored from `priors.published.yaml`.
@@ -246,7 +260,60 @@ export interface TxnTable {
   lifetime_cycles: number | null;
   /** Non-null exactly for receivables. B2B behaviour is driven by age, not attempt count. */
   days_overdue: number | null;
+  /**
+   * The issuing bank, promoted out of `customer.external_ref` by `014_degradation.sql`.
+   *
+   * Nullable only because existing batches predate the column. Populated for everything the
+   * simulator generates now.
+   */
+  issuer_id: string | null;
+  /** Card BIN bucket. Null on rails that never had one — a UPI collect request has no BIN. */
+  bin_bucket: string | null;
   created_at: CreatedAt;
+}
+
+/**
+ * The merchant's authorisation stream — every attempt, succeeded and failed.
+ *
+ * THE DENOMINATOR. Nothing before `014_degradation.sql` recorded a successful payment, so no
+ * rate was computable and "detects revenue at risk" could not be true: a queue of failures
+ * tells you what broke and never tells you that a cohort is breaking more than it was. In a
+ * real deployment this is fed by gateway webhooks.
+ */
+export interface AuthAttemptTable {
+  id: Generated<number>;
+  batch_id: string;
+  issuer_id: string;
+  rail: Rail;
+  bin_bucket: string | null;
+  succeeded: boolean;
+  amount_paise: Bigint;
+  gateway_code: string | null;
+  occurred_at: Timestamp;
+  /** Set on the failures that opened a recovery case. Null on successes, by CHECK. */
+  txn_id: string | null;
+}
+
+/** What the detector concluded, with the evidence it concluded it from. */
+export interface DegradationSignalTable {
+  id: Generated<number>;
+  batch_id: string;
+  issuer_id: string;
+  rail: Rail;
+  bin_bucket: string | null;
+  window_start: Timestamp;
+  window_end: Timestamp;
+  /** When the detector first concluded this, as distinct from the span it covers. */
+  first_seen_at: Timestamp;
+  attempts: number;
+  failures: number;
+  observed_bps: number;
+  /** The contemporaneous peer rate, not a configured constant. */
+  baseline_bps: number;
+  lower_bound_bps: number;
+  dominant_code: string | null;
+  verdict: DegradationVerdict;
+  detected_at: CreatedAt;
 }
 
 /**

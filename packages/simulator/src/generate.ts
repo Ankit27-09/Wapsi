@@ -6,10 +6,11 @@ import {
   type ReasonCode,
   type RiskClass,
 } from '@rc/core';
-import type { Arm, Db } from '@rc/db';
+import { ensureReasonCodesSeeded, type Arm, type Db } from '@rc/db';
 import { deriveRng, type Rng } from './rng.js';
 import { FAILURE_STRINGS, INJECTION_STRINGS, NOVEL_STRINGS } from './strings.js';
 import { ensureTemplatesSeeded } from './templates.js';
+import { planAuthStream } from './authstream.js';
 import { loadTruthModel } from './truth.js';
 
 /**
@@ -35,6 +36,16 @@ import { loadTruthModel } from './truth.js';
 export const SIM_EPOCH = new Date('2026-06-01T04:30:00.000Z');
 
 const GENERATION_SPAN_DAYS = 7;
+
+/**
+ * Card BIN buckets, matching the vocabulary the authorisation stream uses.
+ *
+ * Assigned by customer index rather than drawn, so one customer keeps one card across all
+ * their failures. A BIN redrawn per transaction would make a BIN-level cohort meaningless —
+ * it would be a random partition of the population rather than a group of instruments that
+ * share an issuing range and therefore share a fault.
+ */
+const CARD_BINS = ['BIN_4213', 'BIN_5521', 'BIN_6073', 'BIN_4074'] as const;
 
 // ---------------------------------------------------------------------------
 // Population shape
@@ -602,6 +613,9 @@ export async function generateBatch(db: Db, options: GenerateOptions): Promise<G
   // Reference data the policy depends on. Idempotent, and seeded outside the batch
   // transaction because registered templates are shared across every world rather than
   // owned by one of them.
+  // Reference data first: auth_attempt.gateway_code and degradation_signal.dominant_code
+  // both live in the taxonomy vocabulary, and the latter holds a foreign key to it.
+  await ensureReasonCodesSeeded(db);
   await ensureTemplatesSeeded(db);
 
   // Identity is derived, never assigned by the database.
@@ -729,6 +743,16 @@ export async function generateBatch(db: Db, options: GenerateOptions): Promise<G
           risk_class: planned.riskClass,
           lifetime_cycles: planned.lifetimeCycles,
           days_overdue: planned.daysOverdue,
+          // The cohort keys. Previously reachable only by parsing `customer.external_ref`,
+          // which is fine for display and useless for a GROUP BY — see `014_degradation.sql`.
+          issuer_id: customers[planned.customerIndex]?.issuerId ?? null,
+          // Only card traffic has a BIN. Deriving it from the customer index rather than
+          // drawing it keeps a customer on one card across their failures, which is what
+          // makes a BIN-level cohort meaningful at all.
+          bin_bucket:
+            planned.rail === 'card'
+              ? (CARD_BINS[planned.customerIndex % CARD_BINS.length] ?? null)
+              : null,
         };
       }),
       INSERT_CHUNK,
@@ -789,6 +813,40 @@ export async function generateBatch(db: Db, options: GenerateOptions): Promise<G
       INSERT_CHUNK,
     )) {
       await tx.insertInto('failure_event').values(part).execute();
+    }
+
+    // ---- the authorisation stream ------------------------------------------
+    // The input to detection, and a different dataset from the recovery cases: it carries
+    // successes, which are the denominator no rate can be computed without.
+    //
+    // Truth is loaded a second time here rather than threaded down from `planTxns`.
+    // `loadTruthModel` re-reads and re-parses the file, so this is one extra parse of a 20KB
+    // YAML per batch — measurable, and worth it: the alternative is returning the truth
+    // model out of the planner so the writer can reach it, which puts a ground-truth handle
+    // in a public return type one import away from code that must never see it. Cheap
+    // duplication beats a widened blast radius on the wall.
+    const streamTruth = loadTruthModel();
+    const stream = planAuthStream(seed, SIM_EPOCH, streamTruth.issuers, streamTruth.outages);
+
+    for (const part of chunk(
+      stream.map((attempt) => ({
+        batch_id: batch.id,
+        issuer_id: attempt.issuerId,
+        rail: attempt.rail,
+        bin_bucket: attempt.binBucket,
+        succeeded: attempt.succeeded,
+        amount_paise: String(attempt.amountPaise),
+        gateway_code: attempt.reasonCode,
+        occurred_at: attempt.occurredAt,
+        // Deliberately null. These are the merchant's own traffic, not the seeded recovery
+        // cases — linking them would double-count the population and put collected payments
+        // into the recovery book. The join that matters goes the other way: a detected
+        // cohort is matched to transactions by issuer, rail and time.
+        txn_id: null,
+      })),
+      INSERT_CHUNK,
+    )) {
+      await tx.insertInto('auth_attempt').values(part).execute();
     }
 
     const byReasonCode: Record<string, number> = {};
