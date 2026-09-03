@@ -37,16 +37,32 @@ interface Price {
 
 const PRICES: Readonly<Record<string, Price>> = {
   // --- Google, via the Gemini API ---
+  //
+  // The 3.x rows are the FLASH-LITE and FLASH tier rates carried forward from the published
+  // 2.5 figures, because Google had not published per-model 3.x pricing when this table was
+  // written and a model with no price fails at startup. They are the least-wrong number
+  // available and they are an estimate, which is why it says so here rather than in a
+  // footnote nobody reads. Anyone with the current rate card should correct these; every
+  // model-cost figure in the ablation scales linearly with them.
+  'gemini-3.1-flash-lite': { inputUsdPerMTok: 0.1, outputUsdPerMTok: 0.4 },
+  'gemini-3.5-flash-lite': { inputUsdPerMTok: 0.1, outputUsdPerMTok: 0.4 },
+  'gemini-3.5-flash': { inputUsdPerMTok: 0.3, outputUsdPerMTok: 2.5 },
+  'gemini-3.6-flash': { inputUsdPerMTok: 0.3, outputUsdPerMTok: 2.5 },
+  'gemini-3.7-flash': { inputUsdPerMTok: 0.3, outputUsdPerMTok: 2.5 },
+  'gemini-3.8-flash': { inputUsdPerMTok: 0.3, outputUsdPerMTok: 2.5 },
+  // Published rates.
   'gemini-2.5-flash': { inputUsdPerMTok: 0.3, outputUsdPerMTok: 2.5 },
   'gemini-2.5-flash-lite': { inputUsdPerMTok: 0.1, outputUsdPerMTok: 0.4 },
   'gemini-2.5-pro': { inputUsdPerMTok: 1.25, outputUsdPerMTok: 10 },
   'gemini-2.0-flash': { inputUsdPerMTok: 0.1, outputUsdPerMTok: 0.4 },
 
   // --- Groq ---
+  'openai/gpt-oss-20b': { inputUsdPerMTok: 0.1, outputUsdPerMTok: 0.5 },
+  'openai/gpt-oss-120b': { inputUsdPerMTok: 0.15, outputUsdPerMTok: 0.75 },
+  'qwen/qwen3.8-27b': { inputUsdPerMTok: 0.29, outputUsdPerMTok: 0.59 },
+  'qwen/qwen3.6-27b': { inputUsdPerMTok: 0.29, outputUsdPerMTok: 0.59 },
   'llama-3.3-70b-versatile': { inputUsdPerMTok: 0.59, outputUsdPerMTok: 0.79 },
   'llama-3.1-8b-instant': { inputUsdPerMTok: 0.05, outputUsdPerMTok: 0.08 },
-  'openai/gpt-oss-120b': { inputUsdPerMTok: 0.15, outputUsdPerMTok: 0.75 },
-  'openai/gpt-oss-20b': { inputUsdPerMTok: 0.1, outputUsdPerMTok: 0.5 },
 
   // --- Anthropic, kept because the ablation can still be pointed at it ---
   'claude-opus-5': { inputUsdPerMTok: 5, outputUsdPerMTok: 25 },

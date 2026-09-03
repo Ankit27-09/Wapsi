@@ -91,6 +91,7 @@ interface ArmResult {
   readonly accuracy: AccuracyReport | null;
   readonly transactions: number;
   readonly quarantined: number;
+  readonly modelFailures: number;
   readonly misclassified: number;
   readonly recovered: number;
   readonly recoverable: number;
@@ -164,6 +165,7 @@ async function runClassifierArm(
     accuracy: spec.scorer === null ? null : await scoreClassifier(spec.scorer),
     transactions: run.transactions,
     quarantined: run.quarantined,
+    modelFailures: run.modelFailures,
     misclassified: run.misclassified,
     recovered: metrics.recovered,
     recoverable: metrics.recoverable,
@@ -353,12 +355,13 @@ function reportRupees(results: readonly ArmResult[]): void {
   process.stdout.write('  Net value, identical policy and population, classifier swapped\n\n');
   process.stdout.write(
     table(
-      ['arm', 'recovered', 'rate', 'quarantined', 'mislabelled', 'model cost', 'NET', '% of ceiling'],
+      ['arm', 'recovered', 'rate', 'quarantined', 'failed', 'mislabelled', 'model cost', 'NET', '% of ceiling'],
       results.map((result) => [
         result.label,
         `${result.recovered}/${result.recoverable}`,
         formatRate(result.recoveryRateBps),
         String(result.quarantined),
+        result.modelFailures === 0 ? String.fromCharCode(8212) : String(result.modelFailures),
         String(result.misclassified - result.quarantined),
         formatINR(result.modelCost),
         formatINR(result.net),

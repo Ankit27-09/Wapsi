@@ -53,21 +53,37 @@ export const ORACLE_CLASSIFY: RunClassifier = (input, trueReasonCode) =>
 const MAX_STEPS_PER_TXN = 6;
 
 /**
- * How many transactions are classified at once.
+ * How many classifications run at once.
  *
- * Classification is network-bound and per-transaction independent, so running it serially
- * made the LLM arm take about fifteen minutes for 360 calls — too slow to demonstrate
- * live, and slow enough that a judge would assume something had hung.
- *
- * Safe for reproducibility, which is the only reason it is allowed: the gateway's outcome
- * draw is keyed on each attempt's own idempotency key rather than on a shared generator, so
+ * Classification is network-bound and per-transaction independent, so running it serially is
+ * slow enough that a judge would assume something had hung. Parallelising it is safe for
+ * reproducibility — and that is the only reason it is allowed: the gateway's outcome draw is
+ * keyed on each attempt's own idempotency key rather than on a shared generator, so
  * completion order cannot change any result. The DECISION loop below stays strictly
  * sequential, because attempt ordering and the batch fee budget genuinely do depend on it.
  *
- * Eight rather than higher: the classification phase should not be the thing that trips a
- * rate limit on a shared key.
+ * DEFAULTS TO 2, DOWN FROM 8, because 8 assumed a paid tier. On a free-tier key the first
+ * live ablation rate-limited 36 of 40 calls — and the batch then reported a classifier that
+ * quarantined almost everything, which reads as a bad model rather than as too many requests
+ * per second. The provider layer retries with backoff now, and asking for less is the other
+ * half: not causing a retry storm is faster than surviving one.
+ *
+ * Raise it with `CLASSIFY_CONCURRENCY` on a paid tier. The oracle and keyword arms make no
+ * network calls, so this only affects the model arm.
  */
-const CLASSIFY_CONCURRENCY = 8;
+const CLASSIFY_CONCURRENCY = readConcurrency();
+
+function readConcurrency(): number {
+  const raw = process.env['CLASSIFY_CONCURRENCY'];
+  if (raw === undefined || raw === '') return 2;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 32) {
+    throw new RangeError(
+      `CLASSIFY_CONCURRENCY must be an integer between 1 and 32, got ${JSON.stringify(raw)}`,
+    );
+  }
+  return parsed;
+}
 
 /**
  * Map with bounded concurrency, preserving input order.
@@ -158,6 +174,14 @@ export interface RunResult {
    * and the other wastes a fee.
    */
   readonly misclassified: number;
+  /**
+   * Classifications that never happened — a rate limit, a timeout, a malformed response.
+   *
+   * Reported apart from `quarantined` because they are different facts. A quarantine is the
+   * model declining to guess; this is a call that failed. Merging them makes a throttled run
+   * look like a cautious model.
+   */
+  readonly modelFailures: number;
   /**
    * Set when a model ceiling halted the batch, naming which one.
    *
@@ -287,6 +311,7 @@ export async function runArm(options: RunOptions): Promise<RunResult> {
   let budgetBreach: { readonly rule: BudgetBreach; readonly detail: string } | null = null;
 
   let quarantined = 0;
+  let modelFailures = 0;
   let misclassified = 0;
 
   let stepsTaken = 0;
@@ -346,7 +371,18 @@ export async function runArm(options: RunOptions): Promise<RunResult> {
       at: item.row.failed_at,
     });
 
-    if (item.classification.quarantined) quarantined += 1;
+    // TRANSPORT FAILURES ARE COUNTED SEPARATELY FROM QUARANTINES, and conflating them was
+    // producing a false finding.
+    //
+    // A quarantine is a JUDGEMENT: the model looked at the string and declined to label it,
+    // or labelled it below the confidence floor. A rate limit is a call that never happened.
+    // Both arrive here as `quarantined: true` with `reasonCode: 'unknown'`, so the first
+    // live ablation reported "the model quarantined 26 of 40" when 13 of those were Groq's
+    // free tier refusing requests. That reads as a cautious model and is actually a
+    // throttled one — a conclusion about the wrong thing entirely.
+    if (item.classification.error !== null) modelFailures += 1;
+    else if (item.classification.quarantined) quarantined += 1;
+
     if (item.classification.reasonCode !== item.trueCode) misclassified += 1;
   }
 
@@ -513,6 +549,7 @@ export async function runArm(options: RunOptions): Promise<RunResult> {
     downgraded,
     succeeded,
     quarantined,
+    modelFailures,
     misclassified,
     budgetBreach,
     modelCalls: budget.calls,

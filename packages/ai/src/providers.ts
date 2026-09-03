@@ -69,18 +69,22 @@ export class ProviderError extends Error {
   readonly provider: ProviderId;
   readonly status: number;
   readonly kind: 'auth' | 'rate_limit' | 'bad_request' | 'server' | 'network' | 'shape';
+  /** From the `Retry-After` header, when the provider sent one. */
+  readonly retryAfterMs: number | null;
 
   constructor(args: {
     readonly provider: ProviderId;
     readonly status: number;
     readonly kind: ProviderError['kind'];
     readonly message: string;
+    readonly retryAfterMs?: number | null;
   }) {
     super(`${args.provider} ${args.kind}${args.status > 0 ? ` (${args.status})` : ''}: ${args.message}`);
     this.name = 'ProviderError';
     this.provider = args.provider;
     this.status = args.status;
     this.kind = args.kind;
+    this.retryAfterMs = args.retryAfterMs ?? null;
   }
 }
 
@@ -94,7 +98,98 @@ function kindFor(status: number): ProviderError['kind'] {
   return 'bad_request';
 }
 
+/**
+ * How many times a rate-limited or server-failed call is retried.
+ *
+ * FOUND BY RUNNING IT, not anticipated. The first live ablation rate-limited 36 of 40
+ * classifications on a free tier — the single call worked perfectly, so the batch reported a
+ * classifier that quarantined everything and a model apparently worth less than nothing.
+ * That is a wrong conclusion drawn from a transport problem, and the sort of thing that
+ * would have gone into a report as a finding.
+ *
+ * Retrying does not threaten determinism: a retried call is the same request and gets the
+ * same answer, only later. What it does threaten is wall-clock time, so the ceiling is low
+ * and the batch degrades to quarantine — the correct, already-built path — rather than
+ * hanging.
+ */
+const MAX_ATTEMPTS = 6;
+
+/**
+ * Bounded exponential backoff with jitter, so parallel workers do not retry in lockstep.
+ *
+ * The ceiling is 15 seconds because free tiers are throttled by the minute, not the second:
+ * at a 4-attempt/8-second ceiling, 19 of 40 Gemini calls and 13 of 40 Groq calls still
+ * failed. Waiting longer is the only thing that helps, and a batch that takes a few minutes
+ * and reports a real measurement beats one that finishes fast and reports throttling.
+ */
+function backoffMs(attempt: number): number {
+  const base = Math.min(15_000, 750 * 2 ** attempt);
+  return base + Math.floor(Math.random() * 400);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Longest we will honour from a `Retry-After` header. */
+export const MAX_ADVISED_WAIT_MS = 10_000;
+
+/**
+ * How long to wait before retrying, given the attempt number and whatever the provider
+ * advised. Pure, so the policy can be asserted without a clock.
+ *
+ * The provider's own advice wins when it gives any — it knows its quota window and we are
+ * guessing — but capped, because a provider asking for two minutes is within its rights
+ * and would still be the wrong thing to obey with several hundred transactions queued
+ * behind the call.
+ */
+export function retryDelayMs(attempt: number, advisedMs: number | null): number {
+  if (advisedMs !== null) return Math.min(advisedMs, MAX_ADVISED_WAIT_MS);
+  return backoffMs(attempt);
+}
+
+/**
+ * The delay policy, injectable so a test does not sit through it.
+ *
+ * Raising the ceiling to 15s to survive free tiers took `providers.test.ts` from under a
+ * second to 73, because three of its cases assert on an error kind and were then genuinely
+ * sleeping through six retries to get there. A suite slow enough to skip is a suite that
+ * stops catching things, so the wait is a parameter rather than a constant — with the real
+ * schedule as the default, so production behaviour is what it says it is.
+ */
+export type RetryDelay = (attempt: number, advisedMs: number | null) => number;
+
 async function postJson(
+  provider: ProviderId,
+  url: string,
+  headers: Record<string, string>,
+  body: unknown,
+  delay: RetryDelay = retryDelayMs,
+): Promise<unknown> {
+  let last: ProviderError | null = null;
+
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+    try {
+      return await attemptPost(provider, url, headers, body);
+    } catch (cause) {
+      if (!(cause instanceof ProviderError)) throw cause;
+      last = cause;
+
+      // Only a rate limit, a server fault or a transport failure is worth repeating. An
+      // auth failure or a bad request will fail identically every time, and retrying one
+      // turns a clear error into a slow clear error.
+      const retryable =
+        cause.kind === 'rate_limit' || cause.kind === 'server' || cause.kind === 'network';
+      if (!retryable || attempt === MAX_ATTEMPTS - 1) throw cause;
+
+      await sleep(delay(attempt, cause.retryAfterMs));
+    }
+  }
+
+  throw last ?? new ProviderError({ provider, status: 0, kind: 'network', message: 'no attempt made' });
+}
+
+async function attemptPost(
   provider: ProviderId,
   url: string,
   headers: Record<string, string>,
@@ -135,6 +230,7 @@ async function postJson(
       status: response.status,
       kind: kindFor(response.status),
       message: text.slice(0, 300),
+      retryAfterMs: parseRetryAfter(response.headers.get('retry-after')),
     });
   }
 
@@ -148,6 +244,14 @@ async function postJson(
       message: `response was not JSON: ${text.slice(0, 200)}`,
     });
   }
+}
+
+/** `Retry-After`, which both providers send in seconds. Null when absent or unparseable. */
+function parseRetryAfter(header: string | null): number | null {
+  if (header === null) return null;
+  const seconds = Number.parseFloat(header);
+  if (!Number.isFinite(seconds) || seconds < 0) return null;
+  return Math.round(seconds * 1000);
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +282,16 @@ const GeminiResponseSchema = z
         promptTokenCount: z.number().int().nonnegative().optional(),
         candidatesTokenCount: z.number().int().nonnegative().optional(),
         cachedContentTokenCount: z.number().int().nonnegative().optional(),
+        /**
+         * Reasoning tokens, on the tiers that think before answering.
+         *
+         * BILLED AT THE OUTPUT RATE AND NOT INCLUDED IN `candidatesTokenCount`. Measured on
+         * a live call: a `gemini-3.6-flash` classification reported 58 prompt and 33
+         * candidate tokens against a TOTAL of 276 — the missing 185 were thoughts. Reading
+         * only the candidate count under-reported that call's output cost by 85%, which
+         * would have put a made-up figure in the ablation's headline.
+         */
+        thoughtsTokenCount: z.number().int().nonnegative().optional(),
       })
       .passthrough()
       .optional(),
@@ -188,6 +302,8 @@ export function createGeminiProvider(options: {
   readonly apiKey: string;
   readonly model: string;
   readonly baseUrl?: string;
+  /** Tests only. Omit for the real backoff schedule. */
+  readonly retryDelay?: RetryDelay;
 }): Provider {
   const base = options.baseUrl ?? 'https://generativelanguage.googleapis.com/v1beta';
 
@@ -220,6 +336,7 @@ export function createGeminiProvider(options: {
             maxOutputTokens: call.maxTokens,
           },
         },
+        options.retryDelay,
       );
 
       const parsed = GeminiResponseSchema.safeParse(raw);
@@ -259,7 +376,10 @@ export function createGeminiProvider(options: {
           // them separate — so the cached portion is subtracted out. Getting this backwards
           // would double-count the prefix on every call.
           inputTokens: Math.max(0, (usage?.promptTokenCount ?? 0) - cached),
-          outputTokens: usage?.candidatesTokenCount ?? 0,
+          // Thoughts bill at the output rate and are NOT in `candidatesTokenCount`, so they
+          // are added rather than ignored. See the schema comment: omitting them understated
+          // one measured call by 85%.
+          outputTokens: (usage?.candidatesTokenCount ?? 0) + (usage?.thoughtsTokenCount ?? 0),
           cacheReadTokens: cached,
           cacheWriteTokens: 0,
         },
@@ -287,6 +407,17 @@ const GroqResponseSchema = z
     usage: z
       .object({
         prompt_tokens: z.number().int().nonnegative().optional(),
+        /**
+         * INCLUDES reasoning tokens, unlike Gemini's equivalent.
+         *
+         * Verified against a live call: `openai/gpt-oss-20b` reported 158 prompt and 130
+         * completion against a total of 288, with `reasoning_tokens: 95` — so the 95 are
+         * inside the 130. Adding `completion_tokens_details.reasoning_tokens` on top, as
+         * the Gemini path correctly must, would double-count them here.
+         *
+         * The two providers disagree about this, which is exactly the kind of detail that
+         * makes a shared usage type worth having rather than a per-vendor guess.
+         */
         completion_tokens: z.number().int().nonnegative().optional(),
       })
       .passthrough()
@@ -298,6 +429,8 @@ export function createGroqProvider(options: {
   readonly apiKey: string;
   readonly model: string;
   readonly baseUrl?: string;
+  /** Tests only. Omit for the real backoff schedule. */
+  readonly retryDelay?: RetryDelay;
 }): Provider {
   const base = options.baseUrl ?? 'https://api.groq.com/openai/v1';
 
@@ -324,6 +457,7 @@ export function createGroqProvider(options: {
           temperature: 0,
           max_tokens: call.maxTokens,
         },
+        options.retryDelay,
       );
 
       const parsed = GroqResponseSchema.safeParse(raw);
@@ -378,8 +512,20 @@ export function createGroqProvider(options: {
  * expensive option is something a reader can configure and measure for themselves.
  */
 export const DEFAULT_MODELS: Readonly<Record<ProviderId, string>> = {
-  gemini: 'gemini-2.5-flash',
-  groq: 'llama-3.3-70b-versatile',
+  // PINNED, not `-latest`. A moving alias would mean two runs of one seed could differ
+  // because a vendor shipped a model overnight, and reproducibility from a seed is a claim
+  // this project makes everywhere else.
+  //
+  // Chosen after asking both APIs what they actually serve. The first defaults written here
+  // — `gemini-2.5-flash` and `llama-3.3-70b-versatile` — both 404'd: one is closed to new
+  // keys, the other is simply gone from Groq's catalogue. Model ids rot, so these are
+  // overridable with `LLM_MODEL` and the failure is loud rather than silent.
+  //
+  // Both are the LITE tier on purpose. Classification here reads a short string and returns
+  // one of eighteen enum values; a reasoning tier spends tokens thinking about it and the
+  // ablation exists to show that in rupees.
+  gemini: 'gemini-3.1-flash-lite',
+  groq: 'openai/gpt-oss-20b',
 };
 
 const ENV_KEYS: Readonly<Record<ProviderId, string>> = {

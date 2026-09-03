@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  MAX_ADVISED_WAIT_MS,
   ProviderError,
   createGeminiProvider,
   createGroqProvider,
   readJson,
   resolveProvider,
+  retryDelayMs,
 } from './providers.js';
 import { classificationSystemPrompt } from './llm.js';
 
@@ -20,16 +22,25 @@ import { classificationSystemPrompt } from './llm.js';
  * can group by.
  */
 
+/**
+ * No wait between retries. The real schedule climbs to 15s over six attempts to survive a
+ * free tier, and sitting through it to assert on an error kind cost this file 73 seconds.
+ * The schedule itself is asserted separately, below.
+ */
+const noWait = (): number => 0;
+
 const gemini = createGeminiProvider({
   apiKey: 'test-key',
-  model: 'gemini-2.5-flash',
+  model: 'gemini-3.1-flash-lite',
   baseUrl: 'https://gemini.test/v1beta',
+  retryDelay: noWait,
 });
 
 const groq = createGroqProvider({
   apiKey: 'test-key',
-  model: 'llama-3.3-70b-versatile',
+  model: 'openai/gpt-oss-20b',
   baseUrl: 'https://groq.test/openai/v1',
+  retryDelay: noWait,
 });
 
 const call = {
@@ -91,6 +102,33 @@ describe('Gemini token accounting', () => {
     expect(result.usage.inputTokens).toBe(0);
   });
 
+  it('counts reasoning tokens as output, because they bill at the output rate', async () => {
+    // MEASURED ON A LIVE CALL, not hypothesised. A `gemini-3.6-flash` classification
+    // reported 58 prompt and 33 candidate tokens against a TOTAL of 276 — the missing 185
+    // were thoughts, which are billed and are NOT inside `candidatesTokenCount`.
+    //
+    // Reading only the candidate count under-reported that call's output cost by 85%. The
+    // ablation's whole purpose is to say what the model costs in rupees, so a systematic
+    // 85% understatement there would have been a fabricated headline.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        reply({
+          candidates: [{ content: { parts: [{ text: '{"ok":true}' }] } }],
+          usageMetadata: {
+            promptTokenCount: 58,
+            candidatesTokenCount: 33,
+            thoughtsTokenCount: 185,
+          },
+        }),
+      ),
+    );
+
+    const result = await gemini.complete(call);
+    expect(result.usage.outputTokens).toBe(218);
+    expect(result.usage.inputTokens).toBe(58);
+  });
+
   it('joins multi-part responses rather than taking the first part', async () => {
     vi.stubGlobal(
       'fetch',
@@ -139,6 +177,32 @@ describe('Groq', () => {
     expect(result.usage.cacheReadTokens).toBe(0);
   });
 
+  it('does NOT add reasoning tokens, because Groq already includes them', async () => {
+    // THE TWO PROVIDERS DISAGREE ABOUT THIS, which is the whole reason a shared usage type
+    // beats a per-vendor guess. Verified live: `openai/gpt-oss-20b` reported 158 prompt and
+    // 130 completion against a total of 288, with `reasoning_tokens: 95` — so the 95 are
+    // INSIDE the 130. Adding them, as the Gemini path correctly must, would double-count.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        reply({
+          choices: [{ message: { content: '{"ok":1}' } }],
+          usage: {
+            prompt_tokens: 158,
+            completion_tokens: 130,
+            total_tokens: 288,
+            completion_tokens_details: { reasoning_tokens: 95 },
+          },
+        }),
+      ),
+    );
+
+    const result = await groq.complete(call);
+    expect(result.usage.outputTokens).toBe(130);
+    // The invariant that makes it checkable: prompt + completion accounts for the total.
+    expect(result.usage.inputTokens + result.usage.outputTokens).toBe(288);
+  });
+
   it('sends the word JSON in the prompt, which json_object mode requires', () => {
     // Groq returns a 400 if `response_format: json_object` is requested and the prompt does
     // not mention JSON. That is a run-time failure on every call rather than a compile
@@ -184,6 +248,100 @@ describe('failures arrive as something a report can group by', () => {
     vi.stubGlobal('fetch', vi.fn(reply({ unexpected: true })));
 
     await expect(groq.complete(call)).rejects.toMatchObject({ kind: 'shape' });
+  });
+});
+
+describe('retrying a throttled call', () => {
+  /** A queue of replies, one per call, so attempt counts are observable. */
+  function replies(...bodies: readonly (readonly [unknown, number])[]): ReturnType<typeof vi.fn> {
+    let i = 0;
+    return vi.fn(() => {
+      const next = bodies[Math.min(i, bodies.length - 1)];
+      i += 1;
+      const [body, status] = next ?? [{}, 200];
+      return Promise.resolve(new Response(JSON.stringify(body), { status }));
+    });
+  }
+
+  const ok: readonly [unknown, number] = [
+    { choices: [{ message: { content: '{"ok":1}' } }] },
+    200,
+  ];
+  const throttled: readonly [unknown, number] = [{ error: { message: 'slow down' } }, 429];
+
+  it('recovers when a rate limit clears', async () => {
+    // WHY THIS EXISTS AT ALL. On free tiers the first live ablation lost 19 of 40 Gemini
+    // calls and 13 of 40 Groq calls to 429s, and the report then showed both models level
+    // with a keyword table. Once the calls actually landed, the Gemini arm captured 97.8%
+    // of the legal ceiling against the baseline's 26.5%. The retry is the difference
+    // between measuring a classifier and measuring a quota.
+    const fetchMock = replies(throttled, throttled, ok);
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await groq.complete(call);
+
+    expect(result.text).toBe('{"ok":1}');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not retry a bad request, which would fail identically every time', async () => {
+    const fetchMock = replies([{ error: { message: 'malformed' } }, 400]);
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(groq.complete(call)).rejects.toMatchObject({ kind: 'bad_request' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives up after a bounded number of attempts rather than looping', async () => {
+    // A provider that is down for the day must not hang a batch forever.
+    const fetchMock = replies(throttled);
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(groq.complete(call)).rejects.toMatchObject({ kind: 'rate_limit' });
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+
+  it('reads Retry-After off a 429 rather than guessing', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(new Response('{}', { status: 429, headers: { 'retry-after': '3' } })),
+      ),
+    );
+
+    await expect(groq.complete(call)).rejects.toMatchObject({ retryAfterMs: 3000 });
+  });
+});
+
+describe('the retry delay policy', () => {
+  // Asserted on the pure function, so these cost no wall-clock at all.
+  it("prefers the provider's own advice, which knows the quota window", () => {
+    expect(retryDelayMs(0, 4_000)).toBe(4_000);
+  });
+
+  it('caps that advice, so one header cannot stall a queued batch', () => {
+    // A provider asking for two minutes is within its rights and would still be the wrong
+    // thing to obey with several hundred transactions waiting behind the call.
+    expect(retryDelayMs(0, 120_000)).toBe(MAX_ADVISED_WAIT_MS);
+  });
+
+  it('climbs, and then stops climbing', () => {
+    const waits = [0, 1, 2, 3, 4, 5].map((n) => retryDelayMs(n, null));
+
+    for (let i = 1; i < waits.length; i += 1) {
+      expect(waits[i]!).toBeGreaterThanOrEqual(waits[i - 1]!);
+    }
+    // Jitter is added on top of the ceiling to desynchronise parallel workers, so the
+    // bound is the ceiling plus that, not the ceiling exactly.
+    expect(Math.max(...waits)).toBeLessThan(16_000);
+  });
+
+  it('never returns the same wait twice, so parallel workers do not retry in lockstep', () => {
+    // Without jitter, N workers throttled by the same window all come back at the same
+    // instant and are all throttled again. This is why 8-way concurrency lost half its
+    // calls on a free tier.
+    const sample = new Set(Array.from({ length: 24 }, () => retryDelayMs(3, null)));
+    expect(sample.size).toBeGreaterThan(1);
   });
 });
 
@@ -252,8 +410,8 @@ describe('provider selection', () => {
 
   it('honours LLM_MODEL over the default', () => {
     const { provider } = resolveProvider(
-      env({ GROQ_API_KEY: 'k', LLM_MODEL: 'llama-3.1-8b-instant' }),
+      env({ GROQ_API_KEY: 'k', LLM_MODEL: 'openai/gpt-oss-120b' }),
     );
-    expect(provider?.model).toBe('llama-3.1-8b-instant');
+    expect(provider?.model).toBe('openai/gpt-oss-120b');
   });
 });
