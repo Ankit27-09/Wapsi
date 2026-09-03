@@ -40,19 +40,36 @@ import { readJson, type Provider } from './providers.js';
 export const TUNABLE_FIELDS = ['min_gap_hours', 'ev_floor_paise'] as const;
 export type TunableField = (typeof TUNABLE_FIELDS)[number];
 
-const ProposedChangeSchema = z.object({
-  field: z.enum(TUNABLE_FIELDS),
-  /**
-   * Which reason code this applies to. Null for the global expected-value floor, which is
-   * not per-code.
-   */
-  reason_code: z.enum(REASON_CODES).nullable(),
-  from_value: z.number().int(),
-  to_value: z.number().int(),
-  rationale: z.string().min(20),
-  /** Decision ids the agent relied on. Makes the reasoning checkable rather than trusted. */
-  evidence_decision_ids: z.array(z.string()).max(8),
-});
+const ProposedChangeSchema = z
+  .object({
+    field: z.enum(TUNABLE_FIELDS),
+    /**
+     * Which reason code this applies to. Null for the global expected-value floor, which is
+     * not per-code.
+     *
+     * `.default(null)` rather than plain `.nullable()`, and the difference is not cosmetic.
+     * A nullable-but-REQUIRED field means a global change has to send `reason_code: null`
+     * explicitly, and the model sends it most of the time — which is the worst frequency for
+     * a required key. One run produced three good changes; the next was discarded whole with
+     * `changes.2.reason_code Required`, because the model omitted a key whose only possible
+     * value there is null. Losing an entire proposal over that is not strictness, it is
+     * brittleness: there is no second reading of a missing reason code on a global field.
+     *
+     * The coherence it was implicitly buying is now enforced properly, below.
+     */
+    reason_code: z.enum(REASON_CODES).nullable().default(null),
+    from_value: z.number().int(),
+    to_value: z.number().int(),
+    rationale: z.string().min(20),
+    /** Decision ids the agent relied on. Makes the reasoning checkable rather than trusted. */
+    evidence_decision_ids: z.array(z.string()).max(8),
+  })
+  .refine((change) => (change.field === 'ev_floor_paise') === (change.reason_code === null), {
+    message:
+      'ev_floor_paise is global and must carry no reason code; min_gap_hours is per-code and ' +
+      'must carry one. A per-code change with no code cannot be applied to anything.',
+    path: ['reason_code'],
+  });
 
 export const ProposalSchema = z.object({
   changes: z.array(ProposedChangeSchema).min(1).max(3),
