@@ -41,9 +41,10 @@ export default {
   // Every page reads live data from Postgres, so nothing here is prerenderable at build
   // time. Saying so explicitly avoids Next attempting static generation and failing at
   // build with a database connection error.
-  experimental: {
-    serverComponentsExternalPackages: ['pg', 'kysely'],
-  },
+  //
+  // Top-level rather than under `experimental`: Next 15 moved this key and warns on every
+  // start about the old spelling, which is noise on a console someone else has to read.
+  serverExternalPackages: ['pg', 'kysely'],
 
   eslint: { ignoreDuringBuilds: true },
 };

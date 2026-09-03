@@ -52,7 +52,27 @@ export interface SpokenSend {
  * speaking "rupees undefined", and swallowing that here would defeat it.
  */
 export async function renderSend(sendId: number): Promise<SpokenSend | null> {
-  const row = await db()
+  return (await renderSends([sendId])).get(sendId) ?? null;
+}
+
+/**
+ * The same rendering, for a whole page of sends, in one query.
+ *
+ * WHY THIS EXISTS SEPARATELY. The Delivered table has 146 rows, and calling `renderSend` per
+ * row would issue 146 queries against a pool of ten — concurrently, since they would all be
+ * awaited together. That is not a latency problem, it is a connection-exhaustion problem, and
+ * it fails as a timeout on an unrelated page rather than as anything pointing here.
+ *
+ * A send missing from the returned map is one whose template asked for a value this
+ * transaction has no answer to. Absent rather than half-filled, for the reason above.
+ */
+export async function renderSends(
+  sendIds: readonly number[],
+): Promise<Map<number, SpokenSend>> {
+  // `in ()` is a syntax error in Postgres, and an empty page is a legitimate state.
+  if (sendIds.length === 0) return new Map();
+
+  const rows = await db()
     .selectFrom('message_send')
     .innerJoin('decision', 'decision.id', 'message_send.decision_id')
     .innerJoin('txn', 'txn.id', 'decision.txn_id')
@@ -70,11 +90,30 @@ export async function renderSend(sendId: number): Promise<SpokenSend | null> {
       'txn.days_overdue as daysOverdue',
       'txn.logical_ref as ref',
     ])
-    .where('message_send.id', '=', sendId)
-    .executeTakeFirst();
+    .where('message_send.id', 'in', sendIds)
+    .execute();
 
-  if (row === undefined) return null;
+  const rendered = new Map<number, SpokenSend>();
+  for (const row of rows) {
+    const one = renderRow(row);
+    if (one !== null) rendered.set(row.id, one);
+  }
+  return rendered;
+}
 
+/** One row, filled. Split out so the batch and the single-id path cannot diverge. */
+function renderRow(row: {
+  id: number;
+  channel: string;
+  templateId: string;
+  body: string;
+  variables: string[];
+  language: string;
+  name: string;
+  amount: string | bigint;
+  daysOverdue: number | null;
+  ref: string;
+}): SpokenSend | null {
   /*
    * Values for every variable the templates declare across the corpus.
    *

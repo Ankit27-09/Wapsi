@@ -1,6 +1,6 @@
 import { formatINR } from '@rc/core';
 import { loadBlockedContacts, loadInbox, seedFrom } from '../../lib/queries';
-import { renderSend } from '../../lib/script';
+import { renderSends, type SpokenSend } from '../../lib/script';
 import { SeedPicker } from '../seed-picker';
 import { CallAudio } from './call-audio';
 import { DispatchMail } from './dispatch-mail';
@@ -23,16 +23,24 @@ export default async function Inbox({
   const hinglish = messages.filter((m) => m.language === 'hi_latn').length;
   const voiceSends = messages.filter((m) => m.channel === 'voice');
 
-  // Rendered here rather than in the loader, and through the SAME function the Server Action
-  // uses, so the text on screen is the text that gets synthesised. `rendered_body` in the
-  // database is a stub — see lib/script.ts.
-  const calls = (
-    await Promise.all(
-      voiceSends.map(async (send) => ({ send, script: await renderSend(send.id) })),
-    )
-  ).filter((entry): entry is { send: typeof entry.send; script: NonNullable<typeof entry.script> } =>
-    entry.script !== null,
-  );
+  /*
+   * EVERY message rendered here, in one query, through the SAME function the two Server
+   * Actions use — so the text on screen is the text that gets spoken and the text that gets
+   * emailed. `rendered_body` in the database is a stub; see lib/script.ts.
+   *
+   * This used to cover only the two voice rows, and the Delivered table below printed
+   * `message_template.body` raw. That is the exact failure lib/script.ts was written to
+   * prevent: the page showed `Hi {{name}}, aapka {{merchant}} order…` while the dispatch
+   * button beside it mailed the filled message. Two renderings of one send, disagreeing,
+   * with the braces on the half a judge reads.
+   */
+  const scripts = await renderSends(messages.map((m) => m.id));
+
+  const calls = voiceSends
+    .map((send) => ({ send, script: scripts.get(send.id) }))
+    .filter((e): e is { send: (typeof voiceSends)[number]; script: SpokenSend } =>
+      e.script !== undefined,
+    );
 
   return (
     <>
@@ -186,8 +194,12 @@ export default async function Inbox({
                 <tr key={message.id}>
                   <td>
                     <div style={{ fontFamily: 'var(--sans)' }}>{message.customer}</div>
+                    {/* The filled message, not the template. Falls back to the raw body only
+                        when a template asks for a value this transaction has no answer to —
+                        visible braces are then the honest report, because the alternative is
+                        showing nothing where a message was actually sent. */}
                     <div className="msg" style={{ marginTop: 6 }}>
-                      {message.body}
+                      {scripts.get(message.id)?.text ?? message.body}
                     </div>
                     {/* The two voice rows carry their player in the section above rather
                         than here, so the control is findable instead of buried at row 130 of
