@@ -54,6 +54,20 @@ module.exports = {
       to: { path: POLICY, reachable: true },
     },
     {
+      name: 'chinese-wall-detect-to-sim',
+      severity: 'error',
+      comment:
+        'The detector must never reach the simulator, because the simulator holds the ' +
+        'ANSWER KEY: `outages` in priors.truth.yaml names exactly which cohort degraded, ' +
+        'when, and why. A detector that could read that would score perfectly and would ' +
+        'have measured nothing — precision, recall and detection delay are only ' +
+        'measurements because the thing being measured cannot see them. ' +
+        'The scoring function takes the episodes as an ARGUMENT, supplied by the ' +
+        'evaluation harness, which is allowed to read truth because grading is its job.',
+      from: { path: '^packages/detect' },
+      to: { path: SIMULATOR, reachable: true },
+    },
+    {
       name: 'core-stays-pure',
       severity: 'error',
       comment:
@@ -136,16 +150,52 @@ module.exports = {
     },
   ],
   options: {
-    // Keeps third-party modules in the graph as leaves: the edge is visible, the internals
-    // are not traversed.
+    // Third-party modules stay in the graph as leaves: the edge is visible, the internals
+    // are not traversed. Workspace packages never reach here — see `tsConfig` below, which
+    // maps every `@rc/*` specifier to its source directory, so a cross-package import is an
+    // ordinary source-to-source edge rather than a trip through node_modules.
     doNotFollow: { path: 'node_modules' },
 
-    // Only build output and coverage. See note 1 in the header — excluding node_modules
-    // here is what silently disabled the wall.
-    exclude: { path: '(dist|\\.next|coverage)' },
+    /*
+     * Build output and coverage. The shape of this pattern is load-bearing, and getting it
+     * wrong silently disabled every wall rule in this file for the life of the project.
+     *
+     * WHAT WENT WRONG. pnpm resolves a workspace import through
+     * `packages/policy/node_modules/@rc/core`, dependency-cruiser follows that symlink to its
+     * real target, and the edge lands on `packages/core/dist/index.js`. `dist` was excluded —
+     * and `exclude` DELETES a module from the graph rather than keeping it as a leaf, which
+     * is the distinction the header note above was already warning about. So every workspace
+     * edge vanished before any rule could see it.
+     *
+     * Verified by injecting the breach rather than by reading the config: with
+     * `import { loadTruthModel } from '@rc/simulator'` in `packages/policy/src/ev.ts` and the
+     * dependency properly declared, dependency-cruiser reported that file as having ZERO
+     * dependencies and `pnpm lint:boundaries` passed clean. Only the ESLint layer objected.
+     * The "two independent checks" this project claims were one check and a decoration.
+     *
+     * Anchoring the pattern to `packages/*\/dist` did not help — symlinks are resolved, so
+     * that is exactly where the edges land. Dropping the exclusion entirely did not help
+     * either: compiled output in the graph makes the parser fail outright ("Unexpected
+     * template string") and then NO rule runs.
+     *
+     * The fix is upstream of this line, in `tsConfig`: resolve `@rc/*` to source, so the
+     * graph never touches `dist` and excluding it costs nothing.
+     */
+    exclude: { path: '(^|[\\\\/])(dist|\\.next|coverage)([\\\\/]|$)' },
 
     tsPreCompilationDeps: true,
-    tsConfig: { fileName: 'tsconfig.base.json' },
+    /*
+     * A dedicated tsconfig whose only job is `paths: { "@rc/*": ["packages/*\/src/index.ts"] }`.
+     *
+     * That mapping is what makes the boundary rules operate on real edges: a cross-package
+     * import resolves to the sibling package's SOURCE, so the graph is source-to-source,
+     * `dist` stays out of it, and `reachable: true` has a connected graph to search.
+     *
+     * Deliberately not merged into `tsconfig.base.json`. Adding `paths` there would let a
+     * developer import across packages without declaring the dependency and have the build
+     * accept it — trading one silently-disabled guarantee for another.
+     */
+    tsConfig: { fileName: 'tsconfig.depcruise.json' },
     enhancedResolveOptions: {
       exportsFields: ['exports'],
       conditionNames: ['import', 'require', 'node', 'default'],

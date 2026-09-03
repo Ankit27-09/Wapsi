@@ -11,7 +11,7 @@ of `pnpm lint:boundaries`, which is the same check that fails the build.
 
 ## Contents
 
-1. [The one idea](#1-the-one-idea) — what the system is, in a sentence and a diagram
+1. [The agent loop](#1-the-agent-loop) — detect, determine, execute, and the exit
 2. [Package graph](#2-package-graph) — the real module dependencies, and the wall through them
 3. [The Chinese wall](#3-the-chinese-wall) — why the numbers carry information
 4. [One decision, end to end](#4-one-decision-end-to-end) — the path a single failure takes
@@ -27,28 +27,68 @@ of `pnpm lint:boundaries`, which is the same check that fails the build.
 
 ---
 
-## 1. The one idea
+## 1. The agent loop
 
-A merchant loses revenue five ways. Most systems respond by retrying, and a card retry costs
-₹3.50 whether it works or not — so retrying everything can spend more than it collects.
-
-This system prices each candidate action before taking it, and **usually declines**.
+The brief asks for an agent that **detects** revenue at risk, **determines** the right
+intervention, and **executes a bounded recovery workflow**. Those three verbs are the loop.
 
 ```mermaid
 flowchart LR
-    A["Revenue at risk<br/>₹ amount · a cause · a customer"] --> B{"Expected value<br/>≥ floor?"}
-    B -->|"no · 224 of 514"| C["Refuse<br/><i>and record the arithmetic</i>"]
-    B -->|"yes · 290 of 514"| D{"Permitted?<br/>consent · window · caps · law"}
-    D -->|no| C
-    D -->|yes| E["Act<br/>retry · link · notice · call"]
-    E --> F["Outcome + audit row"]
-    C --> F
+    subgraph DETECT["① DETECT — population"]
+        S["Authorisation stream<br/>14,000 attempts<br/><i>both outcomes</i>"]
+        S --> W["Rolling 30-min window<br/>per issuer × rail"]
+        W --> P{"Cohort vs its PEERS<br/>same rail, same window"}
+        P -->|"Wilson lower bound<br/>clears baseline"| SIG["Signal<br/>outage · fraud rule · rail"]
+        P -->|"41 of 47 cohorts"| OK["No alert"]
+    end
 
-    style B fill:#0c4a6e,stroke:#22d3ee,color:#e0f2fe
-    style D fill:#0c4a6e,stroke:#22d3ee,color:#e0f2fe
-    style C fill:#3f1d2e,stroke:#fb7185,color:#ffe4e6
-    style E fill:#064e3b,stroke:#34d399,color:#d1fae5
+    subgraph DETERMINE["② DETERMINE — per transaction"]
+        T["One failure<br/>₹ amount · a customer"] --> DX["Diagnose<br/><i>18 causes, or unknown</i>"]
+        DX --> EV{"Expected value<br/>≥ floor?"}
+        EV -->|"no"| REF["Refuse<br/><i>and record the arithmetic</i>"]
+        EV -->|"yes"| BD{"Permitted?<br/>consent · window · caps<br/>law · <b>the cohort</b>"}
+        BD -->|no| REF
+    end
+
+    subgraph EXECUTE["③ EXECUTE — bounded"]
+        ACT["Act, once<br/>retry · switch rail · link · notice"]
+        ACT --> OUT["Outcome + audit row"]
+        REF --> OUT
+        OUT --> STOP{"EV still above floor?"}
+        STOP -->|no| DONE["Stop"]
+    end
+
+    SIG -.->|"changes the action,<br/>not just the odds"| BD
+    BD -->|yes| ACT
+    STOP -->|yes| T
+
+    style P fill:#0c4a6e,stroke:#22d3ee,color:#e0f2fe
+    style EV fill:#0c4a6e,stroke:#22d3ee,color:#e0f2fe
+    style BD fill:#0c4a6e,stroke:#22d3ee,color:#e0f2fe
+    style STOP fill:#0c4a6e,stroke:#22d3ee,color:#e0f2fe
+    style REF fill:#3f1d2e,stroke:#fb7185,color:#ffe4e6
+    style ACT fill:#064e3b,stroke:#34d399,color:#d1fae5
+    style DONE fill:#064e3b,stroke:#34d399,color:#d1fae5
+    style SIG fill:#422006,stroke:#fbbf24,color:#fef3c7
 ```
+
+Two things about that diagram are the whole submission.
+
+**The dotted edge points at a bound, not at a probability.** A detected outage does not make
+the engine *less optimistic* about a retry — it forbids the re-presentment and lets the rail
+switch through. The population changes the **action**, which is what "root cause → recovery
+action" means and what no per-transaction rule can do.
+
+**The loop's exit is a gate, not a counter.** Most systems respond to a failure by retrying,
+and a card retry costs ₹3.50 whether it works or not — so retrying everything can spend more
+than it collects. This one prices each candidate action first and **usually declines**: on
+seed 42, of 544 decisions across 328 transactions, 296 fired and **248 were refused**.
+
+```
+  probability × (amount × contribution margin)  −  cost  ≥  floor
+```
+
+Three properties follow from that line, and they are the whole design:
 
 ```
   probability × (amount × contribution margin)  −  cost  ≥  floor
@@ -68,7 +108,7 @@ Three properties follow from that line, and they are the whole design:
 
 ## 2. Package graph
 
-Eight packages and one app. The edges below are the actual `@rc/*` dependencies declared in each
+Nine packages and one app. The edges below are the actual `@rc/*` dependencies declared in each
 `package.json`, and the two forbidden edges are the ones `pnpm lint:boundaries` fails on.
 
 ```mermaid
@@ -78,7 +118,11 @@ flowchart TD
     end
 
     subgraph persistence["persistence"]
-        DB["<b>@rc/db</b><br/>schema · 13 migrations<br/>typed client · triggers"]
+        DB["<b>@rc/db</b><br/>schema · 14 migrations<br/>typed client · triggers"]
+    end
+
+    subgraph observe["the observing half"]
+        DETECT["<b>@rc/detect</b><br/>rolling windows · Wilson bound<br/>peer baselines · scoring"]
     end
 
     subgraph decide["the deciding half"]
@@ -97,7 +141,7 @@ flowchart TD
     end
 
     subgraph surface["surface"]
-        WEB["<b>apps/web</b><br/>Next.js console<br/>6 routes"]
+        WEB["<b>apps/web</b><br/>Next.js console<br/>7 routes"]
     end
 
     DB --> CORE
@@ -105,17 +149,20 @@ flowchart TD
     AI --> CORE & DB
     SIM --> CORE & DB
     RZP --> CORE & DB
+    DETECT --> CORE & DB
     ENGINE --> CORE & DB & POLICY
-    EVAL --> CORE & DB & POLICY & ENGINE & AI & SIM
+    EVAL --> CORE & DB & POLICY & ENGINE & AI & SIM & DETECT
     WEB --> CORE & DB & POLICY
 
     POLICY -.->|"⛔ FORBIDDEN"| SIM
+    DETECT -.->|"⛔ FORBIDDEN"| SIM
     EVAL -.->|"⛔ FORBIDDEN"| RZP
 
     style CORE fill:#0c4a6e,stroke:#22d3ee,color:#e0f2fe
     style POLICY fill:#134e4a,stroke:#2dd4bf,color:#ccfbf1
     style SIM fill:#3f1d2e,stroke:#fb7185,color:#ffe4e6
     style RZP fill:#422006,stroke:#fbbf24,color:#fef3c7
+    style DETECT fill:#164e63,stroke:#67e8f9,color:#cffafe
     style EVAL fill:#1e1b4b,stroke:#818cf8,color:#e0e7ff
 ```
 

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+
+  "//": [
+    "FOR `pnpm lint:boundaries` ONLY. Never used to compile anything.",
+    "",
+    "It exists to make the boundary rules operate on a graph of SOURCE files. Without it,",
+    "dependency-cruiser resolves `@rc/core` the way Node does: through the pnpm symlink at",
+    "packages/<pkg>/node_modules/@rc/core, followed to its real target, landing on",
+    "packages/core/dist/index.js. That has two consequences and both are fatal to the rules:",
+    "",
+    "  1. Excluding build output — which any sane config does — then excludes every workspace",
+    "     edge in the graph, because every one of them terminates in a `dist` path. The wall",
+    "     rules had nothing to forbid. Verified: with an `@rc/simulator` import sitting in",
+    "     packages/policy/src/ev.ts, dependency-cruiser reported that file as having ZERO",
+    "     dependencies and the run passed clean.",
+    "  2. NOT excluding build output puts compiled JS in the graph, where the parser fails",
+    "     outright ('Unexpected template string') and no rule runs at all.",
+    "",
+    "Mapping `@rc/*` to `packages/*/src` avoids both. The graph is source-to-source, `dist`",
+    "stays excluded, and `reachable: true` is evaluated over edges that exist.",
+    "",
+    "Kept separate from tsconfig.base.json deliberately. Adding `paths` there would let a",
+    "developer import across packages without declaring the dependency, and the build would",
+    "accept it — trading one silently-disabled guarantee for another."
+  ],
+
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@rc/*": ["packages/*/src/index.ts"]
+    }
+  }
+}
