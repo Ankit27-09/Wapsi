@@ -199,25 +199,31 @@ export default async function Home({
 
         {hasRun ? (
           <div className="hero-stats">
+            {/*
+             * THE DENOMINATOR GETS ITS OWN TILE, and it goes FIRST.
+             *
+             * It was a second line inside the recovered tile, which was wrong twice. Visually,
+             * one tile's note wrapped to two lines while its neighbours' did not, so the row
+             * read as lopsided. Editorially, it put the thing being measured *after* the
+             * measurement — and the row is now the story in reading order: this much was at
+             * risk, this much margin was kept, that is this share of what was possible, none
+             * of it was wasted, across all five classes.
+             *
+             * The gross is the number a merchant thinks in. The next tile is contribution
+             * margin, because recovering a rupee of revenue is worth its margin rather than a
+             * rupee — so they are different units and showing one without the other invites a
+             * reader to compare them as though they were the same.
+             */}
+            <div className="hero-stat">
+              <div className="label">Money at risk</div>
+              <div className="value">{formatINR(rc.grossAtRisk)}</div>
+              <div className="note">{rc.transactions} failed payments, gross</div>
+            </div>
             <div className="hero-stat primary">
               <div className="label">Net value recovered</div>
               <div className="value">{formatINR(rc.net)}</div>
-              {/*
-               * THE DENOMINATOR, because the numerator alone is unreadable.
-               *
-               * This said "on {recoverable} recoverable of 300" — a hardcoded 300 against a
-               * population that had grown to 328, so it printed "310 recoverable of 300".
-               * Impossible on its face, and it was spotted immediately, which is the right
-               * outcome for a number nobody could check.
-               *
-               * Now both figures come from the batch. The gross is what a merchant thinks in;
-               * the net above is contribution margin, because recovering a rupee of revenue
-               * is worth its margin rather than a rupee. Showing one without the other is how
-               * a reader silently compares two different quantities.
-               */}
               <div className="note">
-                margin on {rc.recovered} of {rc.recoverable} recoverable ·{' '}
-                {rc.transactions} transactions carrying {formatINR(rc.grossAtRisk)}
+                margin on {rc.recovered} of {rc.recoverable} recoverable
               </div>
             </div>
             <div className="hero-stat">

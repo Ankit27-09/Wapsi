@@ -502,9 +502,15 @@ code {
              border-radius: 11px; padding: 16px 18px; }
 .hero-stat .label { font-size: 10px; color: var(--ink-faint); text-transform: uppercase;
                     letter-spacing: 0.09em; font-weight: 700; }
-.hero-stat .value { font-family: var(--mono); font-size: 27px; margin-top: 8px; font-weight: 500;
+/* Scales with the viewport, because the row went from four tiles to five and the longest
+   value is now a lakh figure. `₹97,11,073.95` is thirteen monospaced characters: at a fixed
+   27px that is ~198px of text inside a 197px content box on a 1280px window, so it wrapped —
+   and a wrapped currency figure in a headline tile reads as a layout bug rather than a big
+   number. The floor keeps it legible once the grid reflows to fewer columns. */
+.hero-stat .value { font-family: var(--mono); font-size: clamp(19px, 1.75vw, 27px);
+                    margin-top: 8px; font-weight: 500;
                     font-variant-numeric: tabular-nums; letter-spacing: -0.035em;
-                    line-height: 1.1; color: var(--ink-bright); }
+                    line-height: 1.1; color: var(--ink-bright); white-space: nowrap; }
 .hero-stat .note { font-size: 11px; color: var(--ink-faint); margin-top: 6px; line-height: 1.45; }
 .hero-stat.primary {
   border-color: var(--accent-edge);
