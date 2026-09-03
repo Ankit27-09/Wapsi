@@ -555,9 +555,24 @@ code {
    Three steps between the hero and the detail. It exists because the hero states a claim and
    the sections below prove it, and a reader needs the shape of the mechanism in between. */
 
+/* Six steps and five connectors, in two rows of three at the shell width.
+   An explicit 11-column track (three steps, two arrows, wrapping) rather than the old
+   1fr auto 1fr auto 1fr: at six steps a single row gives each 190px, which is narrower than
+   the text inside it needs, and `auto-fit` cannot express "steps stretch, arrows do not". */
 .flow { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; align-items: stretch;
         gap: 0; border: 1px solid var(--border); border-radius: 13px; overflow: hidden;
         background: var(--surface); }
+
+/* The connector at the end of a row points down into the next one. */
+.flow > .flow-arrow:nth-of-type(3) { transform: rotate(90deg); }
+
+/* The first and last steps are the two the brief names and most submissions skip:
+   detection at the front, and a stopping rule at the back. */
+.flow-step.observe { background: linear-gradient(160deg, rgba(34, 211, 238, 0.07), var(--surface) 70%); }
+.flow-step.observe h4 { color: var(--accent-lit); }
+.flow-step.stopping { background: linear-gradient(160deg, rgba(52, 211, 153, 0.07), var(--surface) 70%); }
+.flow-step.stopping h4 { color: var(--good); }
+.flow-step.stopping .flow-num { color: var(--good); }
 
 .flow-step { padding: 22px 22px 20px; }
 .flow-num { font-family: var(--mono); font-size: 10.5px; color: var(--accent);
@@ -736,3 +751,11 @@ code {
 
   .formula-notes > div { border-right: none; border-bottom: 1px solid var(--border-soft); }
 }
+
+/* ---------- detection ---------- */
+/* Each cure on its own line inside the callout: they are opposites, and running them
+   together as prose is how a reader takes away "the system reacts to degradation" without
+   noticing that it reacts in two incompatible ways. */
+.cure-line { display: block; margin-top: 7px; font-size: 12.5px; }
+.nowrap { white-space: nowrap; }
+.pill.dim { color: var(--ink-faint); border-color: var(--border); }

@@ -191,9 +191,10 @@ export default async function Home({
         </p>
 
         <p className="hero-sub">
-          One decision engine across five kinds of revenue at risk. Every rupee it spends had
-          to clear an expected-value gate first, and every rupee it declined to spend can
-          explain itself.
+          One agent across five kinds of revenue at risk — it detects the leak, diagnoses the
+          cause, prices the intervention, executes a bounded workflow and knows when to stop.
+          Every rupee it spends had to clear an expected-value gate first, and every rupee it
+          declined to spend can explain itself.
         </p>
 
         {hasRun ? (
@@ -264,10 +265,31 @@ export default async function Home({
             control beats a sentence saying the same thing. */}
         <SeedPicker current={seed} path="/" />
 
-      <h3>How one stuck rupee is handled</h3>
+      <h3>The agent loop</h3>
+      <p className="section-note">
+        The brief asks for an agent that <em>detects</em> revenue at risk, <em>determines</em>{' '}
+        the right intervention, and <em>executes a bounded recovery workflow</em>. Those three
+        verbs are the loop below. Nothing in it is open-ended: the last step is the one that
+        stops, and it is reached more often than any other.
+      </p>
+
       <div className="flow">
+        <div className="flow-step observe">
+          <div className="flow-num">01 · DETECT</div>
+          <h4>Watch the whole book</h4>
+          <p>
+            A rolling window over every authorisation, succeeded and failed. When one
+            issuer&rsquo;s cohort fails far past its peers on the same rail at the same
+            moment, that is a degradation — and it is invisible in any single decline.
+          </p>
+        </div>
+
+        <div className="flow-arrow">
+          <Chevron />
+        </div>
+
         <div className="flow-step">
-          <div className="flow-num">01 · DIAGNOSE</div>
+          <div className="flow-num">02 · DIAGNOSE</div>
           <h4>Read the failure</h4>
           <p>
             Messy gateway text — <code className="mono">51 NSF</code>,{' '}
@@ -283,7 +305,7 @@ export default async function Home({
         </div>
 
         <div className="flow-step">
-          <div className="flow-num">02 · PRICE</div>
+          <div className="flow-num">03 · PRICE</div>
           <h4>Cost it out</h4>
           <p>
             The cause selects a strategy, the strategy names a timing, and the timing carries
@@ -297,12 +319,39 @@ export default async function Home({
         </div>
 
         <div className="flow-step decisive">
-          <div className="flow-num">03 · DECIDE</div>
+          <div className="flow-num">04 · DECIDE</div>
           <h4>Usually, refuse</h4>
           <p>
             Legality first, then economics. Consent, quiet hours, weekly ceilings, the
-            e-mandate notice period — then the floor. Whatever the answer, the arithmetic and
-            the rule that produced it are written to an append-only trail.
+            e-mandate notice period, a detected outage — then the floor. Whatever the answer,
+            the arithmetic and the rule that produced it are written down.
+          </p>
+        </div>
+
+        <div className="flow-arrow">
+          <Chevron />
+        </div>
+
+        <div className="flow-step">
+          <div className="flow-num">05 · EXECUTE</div>
+          <h4>Act, once</h4>
+          <p>
+            A retry, a rail switch, a registered template, or a real Razorpay payment link.
+            Keyed idempotently, so a crashed worker resumes without charging anybody twice.
+          </p>
+        </div>
+
+        <div className="flow-arrow">
+          <Chevron />
+        </div>
+
+        <div className="flow-step stopping">
+          <div className="flow-num">06 · STOP</div>
+          <h4>And know when to</h4>
+          <p>
+            There is no <code className="mono">maxAttempts</code> constant. A sequence ends
+            when the expected value crosses the floor — so the stopping rule is derived from
+            the same arithmetic that started it, and cannot be tuned separately.
           </p>
         </div>
       </div>

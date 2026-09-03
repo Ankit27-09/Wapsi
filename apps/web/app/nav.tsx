@@ -11,7 +11,7 @@ import { usePathname } from 'next/navigation';
  * fetch, no client state library, and nothing to keep in sync between a route handler and
  * the page that reads it.
  *
- * A TOP bar rather than a sidebar. Six routes do not need 236 pixels of permanent width, and
+ * A TOP bar rather than a sidebar. Seven routes do not need 236 pixels of permanent width, and
  * this console's pages are wide — dense tables of rupees with eight columns. Giving that
  * horizontal space back to the data is worth more than a persistent vertical list, and the
  * landing page in particular reads better full-width.
@@ -19,6 +19,8 @@ import { usePathname } from 'next/navigation';
 
 const ROUTES = [
   { href: '/', label: 'Home' },
+  // Detection first among the data pages, because it is first in the loop.
+  { href: '/detect', label: 'Detect' },
   { href: '/overview', label: 'Overview' },
   { href: '/exceptions', label: 'Exceptions' },
   { href: '/inbox', label: 'Inbox' },

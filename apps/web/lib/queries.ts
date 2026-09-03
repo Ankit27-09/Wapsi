@@ -570,3 +570,173 @@ function trueCodeOf(raw: unknown): string {
 function isRecoverable(code: string): boolean {
   return PRIORS.rows.some((row) => row.reason_code === code && row.p_bps > 0);
 }
+
+// ---------------------------------------------------------------------------
+// Detection
+// ---------------------------------------------------------------------------
+
+export interface SignalRow {
+  readonly issuerId: string;
+  readonly rail: string;
+  readonly verdict: string;
+  readonly windowStart: Date;
+  readonly windowEnd: Date;
+  readonly firstSeenAt: Date;
+  readonly attempts: number;
+  readonly failures: number;
+  readonly observedBps: number;
+  readonly baselineBps: number;
+  readonly lowerBoundBps: number;
+  readonly dominantCode: string | null;
+  /** Decisions this signal refused, joined by cohort and window. */
+  readonly refusedDecisions: number;
+}
+
+/**
+ * What the detector concluded for a run, with the consequence attached.
+ *
+ * The refusal count is joined rather than stored on the signal, because a signal is a
+ * statement about the world and the refusals are what this system chose to do about it. One
+ * is evidence; the other is behaviour, and conflating them would make the evidence look like
+ * it had been written after the fact to justify the behaviour.
+ */
+export async function loadSignals(seed: number): Promise<readonly SignalRow[]> {
+  const batch = await db()
+    .selectFrom('batch')
+    .select('id')
+    .where('seed', '=', seed)
+    .where('world', '=', WORLD)
+    .where('arm', '=', 'rc')
+    .executeTakeFirst();
+
+  if (batch === undefined) return [];
+
+  const signals = await db()
+    .selectFrom('degradation_signal')
+    .selectAll()
+    .where('batch_id', '=', batch.id)
+    .orderBy('window_start', 'asc')
+    .execute();
+
+  const refusals = await db()
+    .selectFrom('decision')
+    .innerJoin('txn', 'txn.id', 'decision.txn_id')
+    .select(['txn.issuer_id as issuer_id', 'txn.rail as rail', 'decision.refuse_rule as rule'])
+    .where('decision.batch_id', '=', batch.id)
+    .where('decision.refuse_rule', 'in', ['issuer_degraded', 'fraud_rule_active'])
+    .execute();
+
+  return signals.map((signal) => ({
+    issuerId: signal.issuer_id,
+    rail: signal.rail,
+    verdict: signal.verdict,
+    windowStart: signal.window_start,
+    windowEnd: signal.window_end,
+    firstSeenAt: signal.first_seen_at,
+    attempts: signal.attempts,
+    failures: signal.failures,
+    observedBps: signal.observed_bps,
+    baselineBps: signal.baseline_bps,
+    lowerBoundBps: signal.lower_bound_bps,
+    dominantCode: signal.dominant_code,
+    refusedDecisions: refusals.filter(
+      (row) => row.issuer_id === signal.issuer_id && row.rail === signal.rail,
+    ).length,
+  }));
+}
+
+export interface CohortRow {
+  readonly issuerId: string;
+  readonly rail: string;
+  readonly attempts: number;
+  readonly failures: number;
+  readonly failureBps: number;
+  readonly flagged: boolean;
+}
+
+/**
+ * Every cohort in the authorisation stream, flagged or not.
+ *
+ * THE UNFLAGGED ROWS ARE THE POINT. A page showing only detections proves nothing about
+ * precision: an operator cannot tell a detector that found two real problems from one that
+ * fires on everything and happened to be right twice. Showing all of them, with their rates,
+ * makes the decision not to alert as visible as the decision to alert.
+ */
+export async function loadCohorts(seed: number): Promise<readonly CohortRow[]> {
+  const batch = await db()
+    .selectFrom('batch')
+    .select('id')
+    .where('seed', '=', seed)
+    .where('world', '=', WORLD)
+    .where('arm', '=', 'rc')
+    .executeTakeFirst();
+
+  if (batch === undefined) return [];
+
+  const rows = await db()
+    .selectFrom('auth_attempt')
+    .select(({ fn }) => [
+      'issuer_id',
+      'rail',
+      fn.countAll<string>().as('attempts'),
+      fn.count<string>('id').filterWhere('succeeded', '=', false).as('failures'),
+    ])
+    .where('batch_id', '=', batch.id)
+    .groupBy(['issuer_id', 'rail'])
+    .execute();
+
+  const flagged = new Set(
+    (
+      await db()
+        .selectFrom('degradation_signal')
+        .select(['issuer_id', 'rail'])
+        .where('batch_id', '=', batch.id)
+        .execute()
+    ).map((row) => `${row.issuer_id} ${row.rail}`),
+  );
+
+  return rows
+    .map((row) => {
+      const attempts = Number.parseInt(row.attempts, 10);
+      const failures = Number.parseInt(row.failures, 10);
+      return {
+        issuerId: row.issuer_id,
+        rail: row.rail,
+        attempts,
+        failures,
+        failureBps: attempts === 0 ? 0 : Math.round((failures / attempts) * 10_000),
+        flagged: flagged.has(`${row.issuer_id} ${row.rail}`),
+      };
+    })
+    .sort((left, right) => right.failureBps - left.failureBps);
+}
+
+/** Size of the authorisation stream, so the page can say what was actually watched. */
+export async function loadStreamSize(seed: number): Promise<{
+  readonly attempts: number;
+  readonly failures: number;
+}> {
+  const batch = await db()
+    .selectFrom('batch')
+    .select('id')
+    .where('seed', '=', seed)
+    .where('world', '=', WORLD)
+    .where('arm', '=', 'rc')
+    .executeTakeFirst();
+
+  if (batch === undefined) return { attempts: 0, failures: 0 };
+
+  const row = await db()
+    .selectFrom('auth_attempt')
+    .select(({ fn }) => [
+      fn.countAll<string>().as('attempts'),
+      fn.count<string>('id').filterWhere('succeeded', '=', false).as('failures'),
+    ])
+    .where('batch_id', '=', batch.id)
+    .executeTakeFirst();
+
+  return {
+    attempts: Number.parseInt(row?.attempts ?? '0', 10),
+    failures: Number.parseInt(row?.failures ?? '0', 10),
+  };
+}
