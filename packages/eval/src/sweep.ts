@@ -16,7 +16,10 @@ import type { Arm as ArmId } from '@rc/db';
 import { priorKindFor, type ConsentState, type Policy, type PriorTable } from '@rc/policy';
 import {
   DEFAULT_FEE_BUDGET_PER_TXN_PAISE,
+  SIM_EPOCH,
   deriveRng,
+  loadTruthModel,
+  planAuthStream,
   planTxns,
   registeredTemplates,
   type PlannedCustomer,
@@ -24,6 +27,7 @@ import {
   type Rng,
   type TruthModel,
 } from '@rc/simulator';
+import { detect, signalsAffecting, type DegradationSignal } from '@rc/detect';
 import { armById, type Arm } from './arms.js';
 import { attemptLandsAt, gapSinceLastAttempt } from './schedule.js';
 
@@ -236,6 +240,20 @@ export function simulateArm(options: SimulateOptions): SweepArmResult {
   // assigned population would be answering a different question from the one it reports.
   const { txns, customers, customerIssuers } = planTxns(options.seed, options.count);
 
+  // The detector's conclusions, so this path refuses exactly what the database runner
+  // refuses. Without it the two diverged by 26 attempts, which the parity test caught.
+  //
+  // COMPUTED ONCE PER SEED AND CACHED ACROSS WORLDS. A sweep runs 500 perturbed worlds, and
+  // the perturbation moves the truth table's success probabilities — it does not touch the
+  // authorisation stream or the outage episodes, which are properties of the environment
+  // rather than of our beliefs about it. Re-detecting per world would repeat identical work
+  // 500 times over a 14,000-row stream and add minutes to the sweep for no change in result.
+  //
+  // Guarded on the arm for the same reason the runner guards it: only the controller acts on
+  // detection, because giving the baselines outage awareness would flatter them into a
+  // comparison nobody runs.
+  const signals = options.arm.id === 'rc' ? signalsForSeed(options.seed) : [];
+
   let valueRecovered = ZERO;
   let cost = ZERO;
   let recovered = 0;
@@ -336,6 +354,13 @@ export function simulateArm(options: SimulateOptions): SweepArmResult {
           openPromiseDueAt:
             txn.promise?.status === 'open' ? txn.promise.promisedFor : null,
           batchFeeRemaining: feeRemaining,
+          // At `clock`, matching the runner: the population's verdict at the moment the
+          // engine decides, not at the moment the payment failed.
+          cohortRisk: signalsAffecting(signals, {
+            issuerId,
+            rail: txn.rail,
+            at: clock,
+          }),
         },
         { priors, truth: { model: truth, issuerId } },
       );
@@ -514,4 +539,37 @@ export function runSweep(options: SweepOptions): SweepReport {
     losses: draws.filter((entry) => !entry.controllerWins),
     controllerNets: draws.map((entry) => entry.controllerNet),
   };
+}
+
+/**
+ * Detection over a seed's authorisation stream, memoised.
+ *
+ * Keyed on the seed alone, because that is everything the stream depends on: the episodes
+ * come from `priors.truth.yaml` and the traffic from a derived RNG. A sweep therefore pays
+ * for detection once rather than five hundred times.
+ *
+ * Deliberately a module-level cache rather than a parameter threaded through `simulateArm`.
+ * The alternative is every caller — the sweep CLI, the parity test, the frontier scan —
+ * having to know that detection is expensive and arrange to share it, which is exactly the
+ * kind of knowledge that gets forgotten in one of three places.
+ */
+const signalCache = new Map<number, readonly DegradationSignal[]>();
+
+function signalsForSeed(seed: number): readonly DegradationSignal[] {
+  const cached = signalCache.get(seed);
+  if (cached !== undefined) return cached;
+
+  const truth = loadTruthModel();
+  const stream = planAuthStream(seed, SIM_EPOCH, truth.issuers, truth.outages).map((attempt) => ({
+    issuerId: attempt.issuerId,
+    rail: attempt.rail,
+    binBucket: attempt.binBucket,
+    succeeded: attempt.succeeded,
+    reasonCode: attempt.reasonCode,
+    occurredAt: attempt.occurredAt,
+  }));
+
+  const signals = detect(stream);
+  signalCache.set(seed, signals);
+  return signals;
 }

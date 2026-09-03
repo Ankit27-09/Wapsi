@@ -11,6 +11,8 @@ import {
   type ReasonCode,
   type RiskClass,
   type TemplateId,
+  NO_COHORT_RISK,
+  type CohortRisk,
 } from '@rc/core';
 import type { Verdict } from '@rc/db';
 import {
@@ -119,6 +121,14 @@ export interface PlanInput {
   readonly openPromiseDueAt: Date | null;
 
   readonly batchFeeRemaining: Paise;
+  /**
+   * What a detector concluded about this transaction's cohort at `now`.
+   *
+   * Optional, defaulting to `NO_COHORT_RISK`. That default is what makes detection additive:
+   * every existing caller, test and baseline arm behaves exactly as it did before, and the
+   * engine cannot refuse anything it used to allow unless a signal actually fired.
+   */
+  readonly cohortRisk?: CohortRisk;
 }
 
 export type ContactPlan =
@@ -203,6 +213,13 @@ function verdictFor(bound: AttemptBound): Exclude<Verdict, 'fire'> {
     case 'batch_fee_budget':
     case 'pre_debit_notice':
     case 'promise_open':
+    // A detected degradation is a bound, not a terminal state, and the distinction is
+    // load-bearing. `refuse_terminal` tells an operator to stop looking; both of these are
+    // TEMPORARY — an outage ends, a risk rule is relaxed — and the transaction is expected
+    // to be reconsidered afterwards. Reporting them as terminal would write off a
+    // recoverable book because an issuer had a bad afternoon.
+    case 'issuer_degraded':
+    case 'fraud_rule_active':
       return 'refuse_bounds';
     default:
       return assertNever(bound, 'verdictFor');
@@ -292,6 +309,7 @@ export function planNext(input: PlanInput): Plan {
     policy,
     reasonCode,
     riskClass,
+    cohortRisk: input.cohortRisk ?? NO_COHORT_RISK,
     // With no scheduled step there is no intervention to check for legality, and `none` is
     // legal everywhere — so the bounds fall through to the cap check, which is the honest
     // reason a code with an empty schedule cannot act.

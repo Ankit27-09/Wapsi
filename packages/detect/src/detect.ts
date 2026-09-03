@@ -1,7 +1,9 @@
 import {
+  DEGRADATION_VERDICTS,
   Z_99,
   toBps,
   wilsonLowerBound,
+  type DegradationVerdict,
   type Rail,
   type ReasonCode,
 } from '@rc/core';
@@ -44,8 +46,9 @@ import {
  *     answer.
  */
 
-export const DEGRADATION_VERDICTS = ['issuer_outage', 'fraud_rule', 'rail_degraded'] as const;
-export type DegradationVerdict = (typeof DEGRADATION_VERDICTS)[number];
+// The verdict vocabulary lives in @rc/core, because @rc/policy has to act on one and
+// @rc/db has to store one, and neither may depend on this package to learn what they are.
+export { DEGRADATION_VERDICTS, type DegradationVerdict };
 
 /** One authorisation attempt from the merchant's stream. Successes included — they are the
  *  denominator, and without them there is no rate to compute. */
@@ -433,21 +436,4 @@ function coalesce(candidates: readonly Candidate[]): readonly DegradationSignal[
   return merged.sort((a, b) => a.windowStart.getTime() - b.windowStart.getTime());
 }
 
-/**
- * Whether a signal forbids re-presenting a charge on the rail it names.
- *
- * The distinction the three verdicts exist for. An outage and a fraud rule both mean "do not
- * charge this rail now" and differ in what may be done instead; a degraded rail means the
- * problem is not specific to this cohort, and refusing every charge on it would stop the
- * entire recovery book over a condition the alternative rails share.
- */
-export function forbidsCharge(verdict: DegradationVerdict): boolean {
-  return verdict === 'issuer_outage' || verdict === 'fraud_rule';
-}
-
-/** Whether a signal permits re-presenting elsewhere, or means stop entirely. */
-export function permitsRailSwitch(verdict: DegradationVerdict): boolean {
-  // A fraud rule travels with the customer and the card, not with the rail. Switching rails
-  // to evade one is both futile and precisely the behaviour that gets a merchant reviewed.
-  return verdict === 'issuer_outage';
-}
+export { forbidsCharge, permitsRailSwitch } from '@rc/core';

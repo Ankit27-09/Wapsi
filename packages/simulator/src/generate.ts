@@ -11,7 +11,7 @@ import { deriveRng, type Rng } from './rng.js';
 import { FAILURE_STRINGS, INJECTION_STRINGS, NOVEL_STRINGS } from './strings.js';
 import { ensureTemplatesSeeded } from './templates.js';
 import { planAuthStream } from './authstream.js';
-import { loadTruthModel } from './truth.js';
+import { loadTruthModel, type Outage } from './truth.js';
 
 /**
  * The batch generator.
@@ -515,7 +515,130 @@ export function planTxns(seed: number, count: number): {
     });
   }
 
+  // ---- the cases an outage actually produces ------------------------------
+  // Appended, on their own RNG stream, so nothing above is reshuffled.
+  //
+  // WHY THEY HAVE TO EXIST. The main population's failures are spread across seven days,
+  // and an outage occupies ninety minutes of one of them. Drawn independently, essentially
+  // none of the 300 recovery cases belongs to an affected cohort at an affected time — so
+  // the detector found both episodes, correctly, and changed not one decision. A feature
+  // that is wired up and never fires is worse than an absent one, because the wiring looks
+  // like evidence.
+  //
+  // The fix is to model the real pipeline rather than to widen a threshold until something
+  // happened: an outage causes a burst of failures, and those failures ARE recovery cases.
+  txns.push(
+    ...planOutageCases(seed, truth.outages, customers, {
+      rngStrings: deriveRng(seed, 'outage_strings'),
+      rngAmounts: deriveRng(seed, 'outage_amounts'),
+    }),
+  );
+
   return { txns, customers, customerIssuers };
+}
+
+/**
+ * How many recovery cases each material outage contributes.
+ *
+ * Modest on purpose. The point is to make the detector's finding actionable on a measurable
+ * slice of the book, not to make the headline depend on it — an outage cohort large enough
+ * to move the total would be choosing the result rather than demonstrating the mechanism.
+ */
+const CASES_PER_OUTAGE = 14;
+
+/**
+ * The share of an outage's failures that carry its own cause.
+ *
+ * NOT ALL OF THEM, and that is the interesting part. A degraded cohort keeps failing for its
+ * ordinary reasons too — people are still short of funds while the issuer's host is down —
+ * so the dominant code tells you WHY the cohort is bad without claiming every decline in it
+ * has that cause.
+ *
+ * It also makes the fraud-rule bound reachable. `suspected_fraud_block` is a structural zero,
+ * so a transaction carrying it is refused as `terminal` whatever the population says. The
+ * transactions a fraud-rule signal genuinely protects are the ordinary ones in the same
+ * cohort: an `insufficient_funds` retry on a card whose issuer has just tightened its risk
+ * engine is going to be declined too, and only the population knows that.
+ */
+const OUTAGE_DOMINANT_SHARE = 7000;
+
+/** Ordinary causes that continue during an outage, all legal for `payment_failure`. */
+const OUTAGE_BACKGROUND_CAUSES: readonly {
+  readonly item: ReasonCode;
+  readonly weight: number;
+}[] = [
+  { item: 'insufficient_funds', weight: 46 },
+  { item: 'do_not_honour', weight: 34 },
+  { item: 'threeds_timeout', weight: 20 },
+];
+
+function planOutageCases(
+  seed: number,
+  outages: readonly Outage[],
+  customers: readonly PlannedCustomer[],
+  rngs: { readonly rngStrings: Rng; readonly rngAmounts: Rng },
+): readonly PlannedTxn[] {
+  const rng = deriveRng(seed, 'outage_cases');
+  const out: PlannedTxn[] = [];
+
+  for (const outage of outages) {
+    if (!outage.material) continue;
+
+    // Only customers on the affected issuer can be affected by it. A case attributed to the
+    // wrong issuer would be invisible to the detector's cohort filter and would silently
+    // reduce the number of transactions the signal reaches.
+    const eligible = customers
+      .map((customer, index) => ({ customer, index }))
+      .filter((entry) => entry.customer.issuerId === outage.issuer_id);
+
+    if (eligible.length === 0) continue;
+
+    for (let i = 0; i < CASES_PER_OUTAGE; i += 1) {
+      const chosen = eligible[i % eligible.length];
+      if (chosen === undefined) continue;
+
+      const trueCode = rng.chance(bps(OUTAGE_DOMINANT_SHARE))
+        ? outage.dominant_code
+        : rng.weighted(OUTAGE_BACKGROUND_CAUSES);
+
+      // Every outage cause must be legal for the class it is filed under, checked rather
+      // than assumed — the yaml is hand-edited and a `dominant_code` of `abandoned_at_cart`
+      // would otherwise produce a transaction that cannot exist.
+      if (!causeIsValidFor('payment_failure', trueCode)) {
+        throw new Error(
+          `Outage on ${outage.issuer_id} names ${trueCode}, which is not a legal cause for ` +
+            'payment_failure — the class outage-derived cases are filed under',
+        );
+      }
+
+      // Inside the window, so the decision clock lands where the signal is in force.
+      const minute =
+        outage.start_offset_minutes + rng.nextInt(0, Math.max(1, outage.duration_minutes - 1));
+      const failedAt = new Date(SIM_EPOCH.getTime() + minute * 60_000);
+
+      const tierWeights = AMOUNT_TIER_WEIGHTS.payment_failure;
+      const tier = rngs.rngAmounts.weighted(
+        AMOUNT_TIERS.map((t, index) => ({ item: t, weight: tierWeights[index] ?? 0 })),
+      );
+
+      out.push({
+        customerIndex: chosen.index,
+        amountPaise: rngs.rngAmounts.nextInt(tier.minPaise, tier.maxPaise),
+        marginBps: tier.marginBps,
+        rail: outage.rail,
+        isRecurring: false,
+        trueCode,
+        failedAt,
+        riskClass: 'payment_failure',
+        lifetimeCycles: null,
+        daysOverdue: null,
+        promise: null,
+        ...renderDescription(trueCode, rngs.rngStrings),
+      });
+    }
+  }
+
+  return out;
 }
 
 /**

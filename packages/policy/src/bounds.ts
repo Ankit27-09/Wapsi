@@ -10,6 +10,7 @@ import {
   type Paise,
   type ReasonCode,
   type RiskClass,
+  type CohortRisk,
 } from '@rc/core';
 import type { Policy } from './policy.js';
 
@@ -47,7 +48,17 @@ export type AttemptBound =
   /** An e-mandate debit with no pre-debit notification on record 24h ahead. */
   | 'pre_debit_notice'
   /** An open promise-to-pay whose date has not yet arrived. */
-  | 'promise_open';
+  | 'promise_open'
+  /**
+   * The cohort is inside a detected authorisation outage. A rail switch is still allowed —
+   * this refuses the re-presentment, not the recovery.
+   */
+  | 'issuer_degraded'
+  /**
+   * The cohort's declines concentrate on a risk rule. No rail is a way around it: the
+   * decision is about the card, and switching to evade one is how a merchant is reviewed.
+   */
+  | 'fraud_rule_active';
 
 export type ContactBound =
   | 'kill_switch'
@@ -97,6 +108,19 @@ export interface AttemptBoundsInput {
    * until it either pays or breaks.
    */
   readonly openPromiseDueAt: Date | null;
+  /**
+   * What a population-level detector concluded about this transaction's cohort, right now.
+   *
+   * THE ONLY INPUT HERE THAT IS NOT A FACT ABOUT THIS TRANSACTION. Everything else in this
+   * type is per-transaction: its cause, its attempt number, its mandate, its promise. This
+   * is a fact about the thousand other cards behind the same issuer, and it is the reason
+   * the detector exists — no amount of looking at one decline reveals that its issuer's
+   * authorisation host has been failing for forty minutes.
+   *
+   * `NO_COHORT_RISK` when no detector has run, which is the pre-detection behaviour: this
+   * cannot make the engine refuse anything it used to allow unless a signal actually fired.
+   */
+  readonly cohortRisk: CohortRisk;
 }
 
 export interface ContactBoundsInput {
@@ -230,6 +254,52 @@ export function checkAttemptBounds(
       `Only ${input.hoursSinceLastAttempt.toFixed(1)}h since the last attempt; ` +
         `${reasonCode} requires ${minGap}h so the retry lands in a different world than the failure.`,
     );
+  }
+
+  // ---- what the population says --------------------------------------------
+  // Checked before the economics, because a charge into a cohort that is currently failing
+  // is not a bad bet to be priced more carefully — the fee buys an attempt at a host that
+  // cannot answer. The published prior for `issuer_down` is a POPULATION AVERAGE across
+  // normal conditions; using it during an outage prices the attempt at the wrong odds
+  // entirely, and no amount of gate arithmetic detects that from one transaction.
+  //
+  // LAST of the attempt bounds, and it started out third. Every check above is a permanent
+  // fact about this transaction — the intervention is illegal, the cause is terminal, the
+  // attempts are spent — and a degradation is temporary. Running it earlier meant a
+  // `suspected_fraud_block` transaction inside a fraud-rule window was refused as
+  // `fraud_rule_active` when the honest answer is `terminal`: that cause permits no attempts
+  // in any conditions, and reporting the transient reason would send an operator to wait for
+  // an outage to clear on a transaction that was never recoverable.
+  //
+  // So this answers a narrower and more useful question: everything about this transaction
+  // says go, and the population says wait.
+  if (input.cohortRisk.chargeForbidden && incursGatewayFee(input.intervention)) {
+    const { verdict, dominantCode } = input.cohortRisk;
+
+    // A FRAUD RULE AND AN OUTAGE ARE NOT THE SAME REFUSAL, and the difference is the whole
+    // value of naming the cause. An outage forbids THIS rail and a switch is the cure, so
+    // `switch_rail` is deliberately allowed through — the detection changes the action
+    // rather than merely suppressing it. A fraud decline travels with the card, so no rail
+    // is a way around it; switching is futile, and at volume it is indistinguishable from
+    // card testing to the acquirer whose relationship the merchant depends on.
+    const switching = input.intervention === 'switch_rail';
+
+    if (!(switching && input.cohortRisk.railSwitchPermitted)) {
+      return verdict === 'fraud_rule'
+        ? block(
+            'fraud_rule_active',
+            `The ${input.intervention} is refused: this cohort's declines are concentrated ` +
+              `on ${dominantCode ?? 'a risk rule'}, which is a decision about the card ` +
+              'rather than the rail. Re-presenting cannot succeed, and repeating it at ' +
+              'volume is how a merchant loses its acquirer.',
+          )
+        : block(
+            'issuer_degraded',
+            `The ${input.intervention} is refused: this cohort is inside a detected ` +
+              'authorisation outage, so the fee would buy an attempt at a host that is ' +
+              'not answering. A rail switch remains available.',
+          );
+    }
   }
 
   // Strictly greater-than: an attempt that would exactly exhaust the budget is permitted.

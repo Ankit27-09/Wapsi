@@ -135,6 +135,9 @@ importers:
       '@rc/db':
         specifier: workspace:*
         version: link:../db
+      '@rc/detect':
+        specifier: workspace:*
+        version: link:../detect
       '@rc/engine':
         specifier: workspace:*
         version: link:../engine

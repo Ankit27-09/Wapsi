@@ -5,7 +5,9 @@
   "type": "module",
   "description": "The evaluation harness. Runs each arm over an identical seeded batch and reports net value. The only package permitted to see both sides of the Chinese wall.",
   "//": "No `exports` or `main`: nothing imports this package. It is the top of the dependency graph and is only ever run as CLIs from dist/ — declaring a public API that no consumer uses is surface nobody maintains.",
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc --build",
     "test": "vitest run"
@@ -16,6 +18,7 @@
     "@rc/db": "workspace:*",
     "@rc/engine": "workspace:*",
     "@rc/policy": "workspace:*",
-    "@rc/simulator": "workspace:*"
+    "@rc/simulator": "workspace:*",
+    "@rc/detect": "workspace:*"
   }
 }

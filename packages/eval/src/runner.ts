@@ -22,6 +22,13 @@ import {
 import type { Policy, PriorTable } from '@rc/policy';
 import { createSimulatorGateway, loadTruthModel } from '@rc/simulator';
 import { ORACLE_CLASSIFIER, type Classification, type ClassificationInput } from '@rc/ai';
+import {
+  detect,
+  loadAuthStream,
+  recordSignals,
+  signalsAffecting,
+  type DegradationSignal,
+} from '@rc/detect';
 import { armById } from './arms.js';
 import { attemptLandsAt, gapSinceLastAttempt } from './schedule.js';
 
@@ -273,6 +280,8 @@ export async function runArm(options: RunOptions): Promise<RunResult> {
       'txn.failed_at as failed_at',
       'txn.risk_class as risk_class',
       'txn.logical_ref as logical_ref',
+      'txn.issuer_id as issuer_id',
+      'txn.rail as rail',
       'failure_event.raw as raw',
       'failure_event.gateway_code as gateway_code',
       'failure_event.gateway_description as gateway_description',
@@ -303,6 +312,18 @@ export async function runArm(options: RunOptions): Promise<RunResult> {
   );
 
   await ensureReasonCodesSeeded(db);
+
+  // ---- phase 0: DETECT ----------------------------------------------------
+  // Runs before anything is decided, because a decision that consults a signal recorded
+  // afterwards has an audit trail that reads backwards. The stream is the merchant's own
+  // authorisation traffic; the detector never sees the episodes the simulator seeded into it.
+  //
+  // Guarded on the arm. Only the controller acts on detection: the baselines exist to say
+  // what a fixed schedule or a naive retry loop would have collected, and quietly giving
+  // them outage awareness would flatter them into a comparison nobody runs in practice.
+  const signals =
+    options.arm === 'rc' ? await detectAndRecord(db, batch.id) : [];
+
 
   const classify = options.classify ?? ORACLE_CLASSIFY;
   const budget = options.budget ?? loadModelBudget();
@@ -483,6 +504,19 @@ export async function runArm(options: RunOptions): Promise<RunResult> {
           hoursSincePreDebitNotice: context.hoursSincePreDebitNotice,
           openPromiseDueAt: context.openPromiseDueAt,
           batchFeeRemaining: context.batchFeeRemaining,
+          // What the population said about this transaction's cohort at the moment the
+          // engine is deciding — `clock`, not `failed_at`. An outage that has since ended
+          // must not suppress a retry scheduled for tomorrow, and one that started after
+          // the failure must still suppress a retry landing inside it.
+          //
+          // Read from `txn.issuer_id`, deliberately NOT from `issuerByCustomer` above: that
+          // map is populated only for the oracle and is the one sanctioned breach of the
+          // Chinese wall. The column is observable merchant data; the map is ground truth.
+          cohortRisk: signalsAffecting(signals, {
+            issuerId: row.issuer_id,
+            rail: row.rail,
+            at: clock,
+          }),
         },
         {
           priors,
@@ -726,3 +760,22 @@ function trueReasonCode(raw: unknown): ReasonCode {
   );
 }
 
+
+/**
+ * Run the detector over a batch's authorisation stream and persist what it concluded.
+ *
+ * Idempotent per batch by construction: `runArm` refuses to re-run a (seed, arm, world)
+ * that already exists, so this cannot double-insert signals for one batch.
+ *
+ * Returns the signals rather than re-reading them, so the decision loop consults exactly
+ * what was written — a round-trip through the database would introduce the possibility of
+ * deciding on a different set from the one in the audit trail.
+ */
+async function detectAndRecord(db: Db, batchId: string): Promise<readonly DegradationSignal[]> {
+  const stream = await loadAuthStream(db, batchId);
+  if (stream.length === 0) return [];
+
+  const signals = detect(stream);
+  await recordSignals(db, batchId, signals);
+  return signals;
+}

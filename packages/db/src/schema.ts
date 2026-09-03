@@ -125,14 +125,12 @@ export type RiskClass =
 export type PromiseStatus = 'open' | 'kept' | 'broken' | 'superseded';
 export type PromiseSource = 'sms_reply' | 'voice_call' | 'payment_page' | 'agent_note';
 
-/**
- * What a detected degradation licenses. Mirrored from the CHECK in `014_degradation.sql`.
- *
- * Three rather than one, because the correct response differs: an issuer outage says
- * re-present elsewhere, a fraud rule says stop presenting at all, and a degraded rail says
- * the alternatives share the problem so refusing the cohort would halt the whole book.
- */
-export type DegradationVerdict = 'issuer_outage' | 'fraud_rule' | 'rail_degraded';
+// `DegradationVerdict` is imported from @rc/core rather than restated. The other unions in
+// this file are duplicated deliberately — this package sits under both sides of the Chinese
+// wall and must not pull in @rc/policy — but core is already a dependency, so a third copy
+// of this one would be drift with no guarantee bought.
+export type { DegradationVerdict } from '@rc/core';
+import type { DegradationVerdict } from '@rc/core';
 
 /**
  * Timing buckets, mirrored from `priors.published.yaml`.

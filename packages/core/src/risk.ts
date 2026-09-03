@@ -190,3 +190,66 @@ export function interventionIsValidFor(
 ): boolean {
   return RISK_CLASS_META[riskClass].interventions.includes(intervention);
 }
+
+// ---------------------------------------------------------------------------
+// Degradation
+// ---------------------------------------------------------------------------
+// The vocabulary a detected cohort degradation speaks in.
+//
+// It lives in @rc/core rather than in @rc/detect because three packages need it and none of
+// them should depend on the detector to get it: @rc/policy has to act on a signal, @rc/db has
+// to store one, and @rc/detect produces them. Core is the shared vocabulary — that is its
+// stated job — and a union declared in each of the three would drift.
+
+/**
+ * What a detected degradation licenses. Three, because the CURE differs:
+ *
+ *   issuer_outage   the cohort's authorisation host is failing. Re-present elsewhere.
+ *   fraud_rule      the cohort's declines concentrate on a risk engine. Stop presenting —
+ *                   a fraud decline travels with the card, not the rail, so switching rails
+ *                   to evade one is futile and at volume is how a merchant's acquirer
+ *                   relationship gets reviewed.
+ *   rail_degraded   every cohort on the rail is bad, so the alternatives share the problem.
+ *                   Reported, but it must not suppress anything: refusing the whole rail
+ *                   would stop the entire recovery book over a condition it cannot escape.
+ */
+export const DEGRADATION_VERDICTS = ['issuer_outage', 'fraud_rule', 'rail_degraded'] as const;
+export type DegradationVerdict = (typeof DEGRADATION_VERDICTS)[number];
+
+/**
+ * What the policy engine is told about a transaction's cohort.
+ *
+ * DELIBERATELY NOT THE SIGNAL. The engine's question is not "what did the detector find" but
+ * "may I charge this rail right now, and if not may I go elsewhere". Keeping the interface
+ * at that level means the detector's internals — windows, bounds, peer baselines — can change
+ * without changing what the policy is permitted to conclude, and the policy cannot start
+ * making its own inferences from evidence it was handed for a different purpose.
+ */
+export interface CohortRisk {
+  readonly degraded: boolean;
+  /** The charge must not be re-presented on this rail. */
+  readonly chargeForbidden: boolean;
+  /** Another rail is a legitimate response. False for a fraud rule. */
+  readonly railSwitchPermitted: boolean;
+  readonly verdict: DegradationVerdict | null;
+  readonly dominantCode: ReasonCode | null;
+}
+
+/** No degradation known. The state every transaction is in until a detector says otherwise. */
+export const NO_COHORT_RISK: CohortRisk = {
+  degraded: false,
+  chargeForbidden: false,
+  railSwitchPermitted: false,
+  verdict: null,
+  dominantCode: null,
+};
+
+/** Whether a verdict forbids re-presenting a charge on the rail it names. */
+export function forbidsCharge(verdict: DegradationVerdict): boolean {
+  return verdict === 'issuer_outage' || verdict === 'fraud_rule';
+}
+
+/** Whether a verdict permits re-presenting elsewhere, or means stop entirely. */
+export function permitsRailSwitch(verdict: DegradationVerdict): boolean {
+  return verdict === 'issuer_outage';
+}

@@ -103,6 +103,12 @@ export {
   causeIsValidFor,
   incursGatewayFee,
   interventionIsValidFor,
+  type CohortRisk,
+  type DegradationVerdict,
+  DEGRADATION_VERDICTS,
+  NO_COHORT_RISK,
+  forbidsCharge,
+  permitsRailSwitch,
 } from './risk.js';
 
 export {

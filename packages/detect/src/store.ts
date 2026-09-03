@@ -1,7 +1,14 @@
-import { REASON_CODES, type Rail, type ReasonCode } from '@rc/core';
+import {
+  NO_COHORT_RISK,
+  REASON_CODES,
+  forbidsCharge,
+  permitsRailSwitch,
+  type CohortRisk,
+  type Rail,
+  type ReasonCode,
+} from '@rc/core';
 import type { Db } from '@rc/db';
 import type { AuthObservation, DegradationSignal } from './detect.js';
-import { forbidsCharge, permitsRailSwitch, type DegradationVerdict } from './detect.js';
 
 /**
  * The detector's I/O, kept out of `detect.ts` so the judgement stays pure and testable.
@@ -141,33 +148,6 @@ export async function loadSignals(
     verdict: row.verdict,
   }));
 }
-
-/**
- * What the engine needs to know about one transaction's cohort, at one moment.
- *
- * Deliberately not the signal itself. The engine's question is not "what did the detector
- * find" but "may I charge this rail right now, and if not may I go elsewhere" — and keeping
- * the interface at that level means a change to how detection works cannot change what the
- * policy is allowed to conclude from it.
- */
-export interface CohortRisk {
-  readonly degraded: boolean;
-  /** True when the charge must not be re-presented on this rail. */
-  readonly chargeForbidden: boolean;
-  /** True when another rail is a legitimate response. False for a fraud rule, which
-   *  travels with the card rather than the rail. */
-  readonly railSwitchPermitted: boolean;
-  readonly verdict: DegradationVerdict | null;
-  readonly dominantCode: ReasonCode | null;
-}
-
-export const NO_COHORT_RISK: CohortRisk = {
-  degraded: false,
-  chargeForbidden: false,
-  railSwitchPermitted: false,
-  verdict: null,
-  dominantCode: null,
-};
 
 /**
  * The signal in force for a cohort at an instant, if any.

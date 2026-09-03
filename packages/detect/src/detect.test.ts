@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Rail } from '@rc/core';
+import { NO_COHORT_RISK, type Rail } from '@rc/core';
 import {
   DEFAULT_DETECTOR,
   detect,
@@ -8,7 +8,7 @@ import {
   type AuthObservation,
   type DetectorConfig,
 } from './detect.js';
-import { NO_COHORT_RISK, signalsAffecting } from './store.js';
+import { signalsAffecting } from './store.js';
 import { scoreDetection } from './score.js';
 
 /**

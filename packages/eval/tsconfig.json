@@ -4,14 +4,33 @@
     "rootDir": "src",
     "outDir": "dist"
   },
-  "include": ["src/**/*.ts"],
-  "exclude": ["src/**/*.test.ts"],
+  "include": [
+    "src/**/*.ts"
+  ],
+  "exclude": [
+    "src/**/*.test.ts"
+  ],
   "references": [
-    { "path": "../ai" },
-    { "path": "../core" },
-    { "path": "../db" },
-    { "path": "../policy" },
-    { "path": "../simulator" },
-    { "path": "../engine" }
+    {
+      "path": "../ai"
+    },
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../db"
+    },
+    {
+      "path": "../policy"
+    },
+    {
+      "path": "../simulator"
+    },
+    {
+      "path": "../engine"
+    },
+    {
+      "path": "../detect"
+    }
   ]
 }

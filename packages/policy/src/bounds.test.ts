@@ -13,6 +13,8 @@ import {
   type Intervention,
   type ReasonCode,
   type RiskClass,
+  NO_COHORT_RISK,
+  type CohortRisk,
 } from '@rc/core';
 import { checkAttemptBounds, checkContactBounds, type ConsentState } from './bounds.js';
 import { buildPolicy, loadPolicy, type Policy } from './policy.js';
@@ -64,6 +66,7 @@ function attemptInput(overrides: {
   readonly mandateBacked?: boolean;
   readonly hoursSincePreDebitNotice?: number | null;
   readonly openPromiseDueAt?: Date | null;
+  readonly cohortRisk?: CohortRisk;
 }) {
   return {
     now: MIDDAY_IST,
@@ -82,6 +85,11 @@ function attemptInput(overrides: {
     mandateBacked: overrides.mandateBacked ?? false,
     hoursSincePreDebitNotice: overrides.hoursSincePreDebitNotice ?? null,
     openPromiseDueAt: overrides.openPromiseDueAt ?? null,
+    // A healthy cohort unless a test says otherwise, so a test about attempt caps is not
+    // also a test about degradation. `cohortRisk` is REQUIRED on the real input rather than
+    // optional-with-a-default: the engine must state what the population said, and a caller
+    // that forgot would otherwise silently get outage-blind behaviour that looks correct.
+    cohortRisk: overrides.cohortRisk ?? NO_COHORT_RISK,
   };
 }
 
@@ -412,5 +420,162 @@ describe('consent and contact ceilings', () => {
     );
     expect(verdict.kind).toBe('block');
     if (verdict.kind === 'block') expect(verdict.rule).toBe('no_template');
+  });
+});
+
+describe('what the population says', () => {
+  /** A detected issuer outage covering this transaction's cohort right now. */
+  const outage: CohortRisk = {
+    degraded: true,
+    chargeForbidden: true,
+    railSwitchPermitted: true,
+    verdict: 'issuer_outage',
+    dominantCode: 'issuer_down',
+  };
+
+  /** A detected fraud-rule concentration. Same shape in the data, opposite response. */
+  const fraudRule: CohortRisk = {
+    degraded: true,
+    chargeForbidden: true,
+    railSwitchPermitted: false,
+    verdict: 'fraud_rule',
+    dominantCode: 'suspected_fraud_block',
+  };
+
+  it('refuses a retry into a detected outage', () => {
+    // The published prior for a cause is a POPULATION AVERAGE over normal conditions. Using
+    // it during an outage prices the attempt at odds that do not apply, and nothing visible
+    // in this one transaction reveals that.
+    const verdict = checkAttemptBounds(
+      attemptInput({
+        reasonCode: 'insufficient_funds',
+        attemptNo: 1,
+        intervention: 'retry',
+        cohortRisk: outage,
+      }),
+    );
+
+    expect(verdict.kind).toBe('block');
+    if (verdict.kind === 'block') expect(verdict.rule).toBe('issuer_degraded');
+  });
+
+  it('ALLOWS the rail switch, because that is the cure rather than the symptom', () => {
+    // THE POINT OF THE WHOLE FEATURE. A detection that only suppressed would turn an
+    // issuer outage into lost revenue; the value is that it changes the ACTION. The engine's
+    // next candidate step is a switch, and it has to get through.
+    const verdict = checkAttemptBounds(
+      attemptInput({
+        reasonCode: 'insufficient_funds',
+        attemptNo: 1,
+        intervention: 'switch_rail',
+        cohortRisk: outage,
+      }),
+    );
+
+    expect(verdict.kind).toBe('allow');
+  });
+
+  it('refuses even a rail switch when the cohort tripped a fraud rule', () => {
+    // A fraud decline travels with the card, not the rail, so no rail is a way around one.
+    // Switching to evade it is futile, and repeated at volume it is indistinguishable from
+    // card testing to the acquirer the merchant depends on.
+    const verdict = checkAttemptBounds(
+      attemptInput({
+        reasonCode: 'insufficient_funds',
+        attemptNo: 1,
+        intervention: 'switch_rail',
+        cohortRisk: fraudRule,
+      }),
+    );
+
+    expect(verdict.kind).toBe('block');
+    if (verdict.kind === 'block') expect(verdict.rule).toBe('fraud_rule_active');
+  });
+
+  it('does not touch actions that present no charge', () => {
+    // An outage is a fact about authorisation. A payment link asks the customer to pay by
+    // some route of their own choosing, and suppressing it during an outage would forgo
+    // recovery for a reason that does not apply to it.
+    fc.assert(
+      fc.property(fc.constantFrom<Intervention>('notify', 'payment_link'), (intervention) => {
+        const verdict = checkAttemptBounds(
+          attemptInput({
+            reasonCode: 'no_response',
+            riskClass: 'receivable_overdue',
+            attemptNo: 1,
+            intervention,
+            cohortRisk: outage,
+          }),
+        );
+        expect(verdict.kind).toBe('allow');
+      }),
+    );
+  });
+
+  it('reports a terminal cause as terminal, not as degraded', () => {
+    // ORDERING, AND IT WAS WRONG FIRST. This check began third in the sequence, which meant
+    // a `suspected_fraud_block` transaction inside a fraud window was refused as
+    // `fraud_rule_active`. That cause permits no attempts under any conditions, so the
+    // honest answer is `terminal` — the transient reason would send an operator to wait for
+    // something to clear on a transaction that was never recoverable.
+    const verdict = checkAttemptBounds(
+      attemptInput({
+        reasonCode: 'suspected_fraud_block',
+        attemptNo: 1,
+        intervention: 'retry',
+        cohortRisk: fraudRule,
+      }),
+    );
+
+    expect(verdict.kind).toBe('block');
+    if (verdict.kind === 'block') expect(verdict.rule).toBe('terminal');
+  });
+
+  it('changes nothing at all when no detector has run', () => {
+    // Detection is ADDITIVE. Every existing caller passes `NO_COHORT_RISK`, and the engine
+    // must not refuse anything it used to allow unless a signal actually fired.
+    fc.assert(
+      fc.property(anyReasonCode, fc.integer({ min: 1, max: 5 }), (reasonCode, attemptNo) => {
+        const withoutDetector = checkAttemptBounds(attemptInput({ reasonCode, attemptNo }));
+        const healthy = checkAttemptBounds(
+          attemptInput({
+            reasonCode,
+            attemptNo,
+            cohortRisk: {
+              degraded: false,
+              chargeForbidden: false,
+              railSwitchPermitted: false,
+              verdict: null,
+              dominantCode: null,
+            },
+          }),
+        );
+        expect(healthy).toEqual(withoutDetector);
+      }),
+    );
+  });
+
+  it('does not suppress on a merely degraded rail', () => {
+    // `rail_degraded` means every cohort on the rail is bad, so the alternatives share the
+    // problem. Refusing on it would halt the entire recovery book over a condition it
+    // cannot escape — so the detector reports it and the policy declines to act on it.
+    const railWide: CohortRisk = {
+      degraded: true,
+      chargeForbidden: false,
+      railSwitchPermitted: false,
+      verdict: 'rail_degraded',
+      dominantCode: 'network_timeout',
+    };
+
+    const verdict = checkAttemptBounds(
+      attemptInput({
+        reasonCode: 'insufficient_funds',
+        attemptNo: 1,
+        intervention: 'retry',
+        cohortRisk: railWide,
+      }),
+    );
+
+    expect(verdict.kind).toBe('allow');
   });
 });

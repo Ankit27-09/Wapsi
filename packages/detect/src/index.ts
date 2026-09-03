@@ -31,7 +31,12 @@ export {
   loadSignals,
   recordSignals,
   signalsAffecting,
-  type CohortRisk,
 } from './store.js';
+
+// Re-exported for callers that only import this package. The types themselves live in
+// @rc/core, so @rc/policy can act on a signal without depending on the detector.
+// `DegradationVerdict` already arrives via `./detect.js`, which re-exports it from the same
+// place — naming it twice here is a duplicate identifier, not a second definition.
+export { NO_COHORT_RISK, type CohortRisk } from '@rc/core';
 
 export { scoreDetection, type DetectionScore, type KnownOutage } from './score.js';
