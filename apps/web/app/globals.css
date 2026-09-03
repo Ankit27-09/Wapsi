@@ -28,11 +28,31 @@
   --border-soft: #14202e;
   --border-lit: #2a3d55;
 
-  /* ---- text ------------------------------------------------------------ */
+  /* ---- text ------------------------------------------------------------
+     Measured against the grounds below rather than eyeballed, because two of these were
+     wrong and one was a genuine accessibility failure. On `--surface`:
+
+                       was              now
+       --ink           16.36  AAA       16.36  AAA   unchanged
+       --ink-bright    17.62  AAA       17.62  AAA   unchanged
+       --ink-dim        7.29  AAA       11.70  AAA   body prose, read at a glance
+       --ink-faint      3.76  FAIL       7.37  AAA   labels and captions
+
+     `--ink-faint` at 3.76 did not meet WCAG AA for normal text (4.5), and it is used for
+     every table header, tile label and caption in the console. That was not a preference.
+
+     `--ink-dim` passed AA on paper and still read as dull, because the contrast ratio does
+     not account for size: it carries 12.5px prose in the flow cards, where a technically
+     compliant grey is genuinely hard to read on a bright display.
+
+     The scale shifts up one notch — the old `--ink-dim` is almost exactly the new
+     `--ink-faint` — so the hierarchy is preserved with every level now AAA. Not pushed to
+     white: `--ink-bright` is what `<strong>` and headings use, and if body prose is white
+     then emphasis has nothing left to be. */
   --ink: #eaf2fb;
   --ink-bright: #f6fafe;
-  --ink-dim: #93a4bd;
-  --ink-faint: #5d7290;
+  --ink-dim: #c2cfe0;
+  --ink-faint: #94a5bd;
 
   /* ---- accent: one hue, four jobs -------------------------------------- */
   --accent: #22d3ee;        /* the brand cyan — borders, bars, underlines */
@@ -590,7 +610,11 @@ code {
             letter-spacing: 0.14em; font-weight: 600; margin-bottom: 10px; }
 .flow-step h4 { margin: 0 0 7px; font-size: 15px; letter-spacing: -0.02em; font-weight: 800;
                 color: var(--ink-bright); }
-.flow-step p { margin: 0; font-size: 12.5px; color: var(--ink-dim); line-height: 1.6; }
+/* `--ink` rather than `--ink-dim`: this is the prose that explains the agent loop, so it is
+   primary content in this band and not a caption on something else. It is also the text that
+   got flagged as unreadable — at 12.5px on the tinted card gradients, a secondary grey was
+   the wrong token regardless of what its contrast ratio said. */
+.flow-step p { margin: 0; font-size: 12.5px; color: var(--ink); line-height: 1.6; }
 .flow-step code { font-size: 11px; }
 
 /* The connector. A chevron rather than an arrow glyph, so it scales with the panel and does
