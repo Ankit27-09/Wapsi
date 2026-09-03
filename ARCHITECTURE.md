@@ -39,7 +39,7 @@ flowchart LR
         S --> W["Rolling 30-min window<br/>per issuer × rail"]
         W --> P{"Cohort vs its PEERS<br/>same rail, same window"}
         P -->|"Wilson lower bound<br/>clears baseline"| SIG["Signal<br/>outage · fraud rule · rail"]
-        P -->|"41 of 47 cohorts"| OK["No alert"]
+        P -->|"23 of 25 cohorts"| OK["No alert"]
     end
 
     subgraph DETERMINE["② DETERMINE — per transaction"]
@@ -108,7 +108,7 @@ Three properties follow from that line, and they are the whole design:
 
 ## 2. Package graph
 
-Nine packages and one app. The edges below are the actual `@rc/*` dependencies declared in each
+Ten packages and one app. The edges below are the actual `@rc/*` dependencies declared in each
 `package.json`, and the two forbidden edges are the ones `pnpm lint:boundaries` fails on.
 
 ```mermaid
@@ -276,7 +276,8 @@ attempts and escalates. No intervention fires on an unidentified cause.
 
 ## 5. The gate and the bounds
 
-Every reason an action can be refused, in the order they are checked. **Order is the design:**
+All nineteen reasons an action can be refused, in the order they are checked. **Order is the
+design:**
 authorisation before economics, because there is no point pricing an action nobody is permitted
 to take. A transaction blocked by quiet hours should report quiet hours, not a marginal
 expected value.
@@ -300,7 +301,11 @@ flowchart TD
     CAP -->|yes| FEE{"batch fee budget<br/>remaining?"}
 
     FEE -->|exhausted| R6["refuse_bounds<br/><i>batch_fee_budget</i>"]
-    FEE -->|yes| MSG{"action IS a message,<br/>and the message is blocked?"}
+    FEE -->|yes| COHORT{"cohort inside a detected<br/>degradation right now?"}
+
+    COHORT -->|"outage · charge on that rail"| R9["refuse_bounds<br/><i>issuer_degraded</i><br/>a rail switch is still allowed"]
+    COHORT -->|"fraud rule · any charge"| R10["refuse_bounds<br/><i>fraud_rule_active</i><br/>no rail evades it"]
+    COHORT -->|clear| MSG{"action IS a message,<br/>and the message is blocked?"}
 
     MSG -->|blocked| R7["refuse<br/><i>consent · quiet_hours<br/>contact_ceiling · ncpr_registry<br/>voice_window · voice_ceiling<br/>never_contact · no_template</i>"]
     MSG -->|sendable| EV{"p × value − cost<br/>≥ floor?"}
@@ -314,8 +319,21 @@ flowchart TD
     style R2 fill:#3f1d2e,stroke:#fb7185,color:#ffe4e6
     style R7 fill:#3f1d2e,stroke:#fb7185,color:#ffe4e6
     style R8 fill:#422006,stroke:#fbbf24,color:#fef3c7
+    style R9 fill:#3f1d2e,stroke:#fb7185,color:#ffe4e6
+    style R10 fill:#3f1d2e,stroke:#fb7185,color:#ffe4e6
+    style COHORT fill:#164e63,stroke:#67e8f9,color:#cffafe
     style EV fill:#0c4a6e,stroke:#22d3ee,color:#e0f2fe
 ```
+
+**One of those checks is not about the transaction at all.** `issuer_degraded` and
+`fraud_rule_active` come from the population — a fact about the thousand other cards behind
+the same issuer, which no amount of looking at this one decline reveals. They are checked
+**last** among the attempt bounds, and that ordering was wrong first: every check above them is
+a permanent fact (the intervention is illegal, the cause is terminal, the attempts are spent)
+while a degradation is temporary, so running the cohort check early reported a
+`suspected_fraud_block` transaction inside a fraud window as `fraud_rule_active` when the
+honest answer is `terminal`. Placed last, it answers a narrower and more useful question:
+everything about this transaction says go, and the population says wait.
 
 **Two bound checks, not one, and the split is deliberate.** `checkAttemptBounds` asks *may this
 attempt happen?*; `checkContactBounds` asks *may this customer be messaged right now?* A retry
@@ -329,8 +347,9 @@ thirds on the messaging classes; see `FAILURES.md` §1.
 
 **Every refusal carries its arithmetic and its rule.** `decision.refuse_rule` is a column, so
 "what did the consent bound cost us this batch?" is a query. The answer is **₹1,70,547 of
-expected recovery, 88% of the entire shortfall against the ceiling** — stated in the report
-rather than left as an unexplained gap.
+expected recovery, 85% of the entire shortfall against the ceiling** — stated in the report
+rather than left as an unexplained gap. Detection accounts for ₹7,021 of it across 11
+refusals, which is the cost of not paying fees into a host that was not answering.
 
 ---
 
@@ -458,7 +477,7 @@ Migration 008 exists for that reason.
 
 ## 8. Data model
 
-Nineteen tables and one derived view, across thirteen migrations. The relationships that matter:
+Twenty tables and one derived view, across fourteen migrations. The relationships that matter:
 
 ```mermaid
 erDiagram
@@ -682,9 +701,14 @@ client can never decide anything.
 
 ```mermaid
 flowchart LR
-    subgraph ai["MODEL — two jobs, both bounded"]
+    subgraph ai["MODEL — three jobs, all bounded"]
         C["<b>classify</b><br/>messy gateway text →<br/>one of 18 reason codes"]
         P["<b>propose</b><br/>audit trail →<br/>two tunable numbers"]
+        V["<b>speak</b><br/>a registered script →<br/>audio, nothing composed"]
+    end
+
+    subgraph stat["STATISTICS — no model at all"]
+        D["<b>detect</b><br/>rolling windows · Wilson bound<br/>contemporaneous peer baselines"]
     end
 
     subgraph det["DETERMINISTIC — everything that moves money"]
@@ -697,10 +721,12 @@ flowchart LR
 
     C -->|"a reason code,<br/>and nothing else"| det
     P -->|"a proposal a human<br/>must approve"| det
-
+    D -->|"a bound, with the counts<br/>it was computed from"| det
+    det -->|"an approved template id"| V
     det --> MONEY["money moves"]
 
     style ai fill:#1e1b4b,stroke:#818cf8,color:#e0e7ff
+    style stat fill:#164e63,stroke:#67e8f9,color:#cffafe
     style det fill:#064e3b,stroke:#34d399,color:#d1fae5
     style MONEY fill:#0c4a6e,stroke:#22d3ee,color:#e0f2fe
 ```
@@ -708,18 +734,42 @@ flowchart LR
 There is **no model in the decision path**. The LLM's contribution arrives upstream as a reason
 code and its influence ends there.
 
-**Three properties bound prompt injection, and the second is a mechanism rather than an
-intention:**
+**Detection is statistics, not AI, and that is a choice rather than a shortcut.** The obvious
+way to find a degrading cohort is to ask a model whether something looks wrong. A Wilson score
+interval against a contemporaneous peer baseline answers the same question with a number that
+can be recomputed, disputed and stored beside the decision it changed — and it is the only
+version that lets `degradation_signal` carry the counts and the bound rather than a verdict
+nobody can check. An anomaly detector whose reasoning is unavailable is not auditable, and this
+one has to justify refusing a charge.
 
-1. The prompt frames the failure text as untrusted data.
-2. The output is a **Zod enum** over the taxonomy. A model can *index into* the codes; it cannot
-   *become* an instruction. A value outside the enum is rejected, not trusted.
-3. Even a successful steer is bounded by everything downstream. The worst an injection achieves
-   is one wrong reason code, which then meets a published prior, the gate, a schedule and a fee
-   budget. It cannot widen a bound, raise a cap, or authorise an unbudgeted attempt.
+**Speech is the one model output a customer perceives directly, and it is the most tightly
+bounded.** `@rc/voice` renders an approved template and composes nothing: rendering refuses an
+undeclared variable, a missing value, a value containing `{{`, and any placeholder surviving
+substitution. Stricter than the SMS path deliberately — a wrong message can be read,
+screenshotted and disputed afterwards, while a call is gone when it ends and there is no
+send-time review of audio.
 
-Every batch deliberately contains injection attempts (3%) and novel strings the taxonomy has
-never seen (12%), so behaviour under attack is measured rather than asserted.
+**Three properties bound prompt injection, and only two of them hold absolutely:**
+
+1. The prompt frames the failure text as untrusted data. An *intention*, not a mechanism.
+2. The output is a **Zod enum** over the taxonomy, and `classification.reason_code` is a
+   foreign key to the seeded `reason_code` table. A model can *index into* the codes; it cannot
+   *become* an instruction, and a value outside the eighteen cannot be stored at all.
+3. A cause only ever selects a schedule row — it cannot become one. So the planted attack
+   demanding "unlimited retries" has nothing to attack: the schedule comes from the policy YAML
+   and no classifier output will change it.
+
+**What those do not cover, with the number.** Being steered to a label that IS in the taxonomy
+but wrong, which spends a real fee on the wrong strategy. Each planted attack now declares the
+label it is trying to force, so this is measured rather than assumed — and against the keyword
+baseline, **3 of 4 label-naming attacks land their demand exactly**. "The keyword classifier
+cannot be steered, it has no instruction-following surface" is true and irrelevant: it cannot
+be *persuaded*, and it is steered anyway by the cheaper attack, which is to write
+`network_timeout` into the text and let a keyword matcher match it.
+
+That points against the convenient answer, which is why it is here. The free classifier is not
+the conservative choice — it is the one that loses to a single line of text. `pnpm ablate`
+measures the model path the same way.
 
 **Messaging is registered, not generated.** `message_send.template_id` is NOT NULL against a
 DLT-registered row. There is no column in which free-form model output could be sent. The model

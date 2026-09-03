@@ -24,6 +24,9 @@ export {
   INJECTION_STRINGS,
   NOVEL_STRINGS,
   allLabelledStrings,
+  injectionDemandFor,
+  isInjection,
+  type InjectionString,
 } from './strings.js';
 
 export {

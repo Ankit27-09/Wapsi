@@ -37,42 +37,71 @@ import type { Policy } from './policy.js';
  * function without pretending to be an attempt.
  */
 
-export type AttemptBound =
-  | 'kill_switch'
-  | 'terminal'
-  | 'attempt_cap'
-  | 'min_gap'
-  | 'batch_fee_budget'
+/**
+ * Const arrays with the types derived from them, rather than bare unions.
+ *
+ * The same idiom as `REASON_CODES` and `INTERVENTIONS` in @rc/core, and adopted here for a
+ * specific reason: a TypeScript union cannot be counted at run time, so
+ * `ARCHITECTURE.md`'s claim to list *every* reason an action can be refused had nothing
+ * holding it to account — and it was wrong twice, first missing the two detection bounds and
+ * then stating the total as sixteen when the union came to nineteen.
+ *
+ * `bounds.test.ts` now pins the count. Adding a bound fails that test, which is the point:
+ * the failure is a reminder to update the prose that promises completeness.
+ */
+export const ATTEMPT_BOUNDS = [
+  'kill_switch',
+  'terminal',
+  'attempt_cap',
+  'min_gap',
+  'batch_fee_budget',
   /** The intervention is not legal for this risk class — checked before it is priced. */
-  | 'illegal_intervention'
+  'illegal_intervention',
   /** An e-mandate debit with no pre-debit notification on record 24h ahead. */
-  | 'pre_debit_notice'
+  'pre_debit_notice',
   /** An open promise-to-pay whose date has not yet arrived. */
-  | 'promise_open'
+  'promise_open',
   /**
    * The cohort is inside a detected authorisation outage. A rail switch is still allowed —
    * this refuses the re-presentment, not the recovery.
    */
-  | 'issuer_degraded'
+  'issuer_degraded',
   /**
    * The cohort's declines concentrate on a risk rule. No rail is a way around it: the
    * decision is about the card, and switching to evade one is how a merchant is reviewed.
    */
-  | 'fraud_rule_active';
+  'fraud_rule_active',
+] as const;
 
-export type ContactBound =
-  | 'kill_switch'
-  | 'never_contact'
-  | 'no_template'
-  | 'consent'
-  | 'quiet_hours'
-  | 'contact_ceiling'
+export type AttemptBound = (typeof ATTEMPT_BOUNDS)[number];
+
+export const CONTACT_BOUNDS = [
+  'kill_switch',
+  'never_contact',
+  'no_template',
+  'consent',
+  'quiet_hours',
+  'contact_ceiling',
   /** On the NCPR/DND registry. Blocks voice specifically, not messaging. */
-  | 'ncpr_registry'
+  'ncpr_registry',
   /** Outside the narrower window permitted for outbound calls. */
-  | 'voice_window'
+  'voice_window',
   /** Weekly ceiling for calls, which is tighter than the one for messages. */
-  | 'voice_ceiling';
+  'voice_ceiling',
+] as const;
+
+export type ContactBound = (typeof CONTACT_BOUNDS)[number];
+
+/**
+ * Every distinct reason an action can be refused.
+ *
+ * `kill_switch` appears in both lists and is one reason, so this is a union rather than a
+ * concatenation — 19, not 20. `ev_floor` is included because it is a refusal an operator sees
+ * in `decision.refuse_rule`, even though it is the economics declining rather than a bound.
+ */
+export const ALL_REFUSAL_REASONS: readonly string[] = [
+  ...new Set<string>([...ATTEMPT_BOUNDS, ...CONTACT_BOUNDS, 'ev_floor']),
+];
 
 export type ConsentState = 'opt_in' | 'opt_out' | 'unknown';
 

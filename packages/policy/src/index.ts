@@ -48,4 +48,7 @@ export {
   type ContactBoundsInput,
   checkAttemptBounds,
   checkContactBounds,
+  ALL_REFUSAL_REASONS,
+  ATTEMPT_BOUNDS,
+  CONTACT_BOUNDS,
 } from './bounds.js';

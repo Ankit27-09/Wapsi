@@ -689,7 +689,7 @@ function renderDescription(
   rng: Rng,
 ): { readonly description: string; readonly gatewayCode: string | null; readonly rendering: Rendering } {
   if (rng.chance(INJECTION_SHARE)) {
-    return { description: rng.pick(INJECTION_STRINGS), gatewayCode: null, rendering: 'injection' };
+    return { description: rng.pick(INJECTION_STRINGS).text, gatewayCode: null, rendering: 'injection' };
   }
 
   if (rng.chance(NOVEL_SHARE)) {

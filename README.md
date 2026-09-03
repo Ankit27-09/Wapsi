@@ -14,26 +14,33 @@ all**, because most recovery attempts destroy value and the system can prove whi
 
 <!-- Regenerate with `pnpm demo`. Seed 42, policy v1. -->
 
-300 transactions · 293 recoverable · every arm on an identical seeded population
+328 transactions · 310 recoverable · every arm on an identical seeded population
 
 | Arm | Recovered | Rate | ₹ value recovered | ₹ cost | ₹ **net** | **% of ceiling** |
 |---|---|---|---|---|---|---|
-| **B0** · do nothing | 0/293 | 0.0% | ₹0.00 | ₹0.00 | ₹0.00 | 0.0% |
-| **B1** · retry all, immediately | 25/293 | 8.5% | ₹54,979.68 | ₹429.00 | ₹54,550.68 | 11.5% |
-| **B2** · fixed-schedule dunning | 50/293 | 17.1% | ₹96,995.05 | ₹1,118.60 | ₹95,876.45 | 20.4% |
-| **B4** · blast reminders at everything | 9/293 | 3.1% | ₹99,401.01 | ₹127.00 | ₹99,274.01 | 20.9% |
-| **B3** · oracle (ceiling) | 117/293 | 39.9% | ₹4,76,316.79 | ₹576.14 | ₹4,75,740.65 | **100.0%** |
-| **RC** · Recovery Controller | **76/293** | **25.9%** | **₹2,97,863.79** | **₹357.82** | **₹2,97,505.97** | **62.5%** |
+| **B0** · do nothing | 0/310 | 0.0% | ₹0.00 | ₹0.00 | ₹0.00 | 0.0% |
+| **B1** · retry all, immediately | 27/310 | 8.7% | ₹55,983.86 | ₹527.00 | ₹55,456.86 | 11.3% |
+| **B2** · fixed-schedule dunning | 57/310 | 18.4% | ₹1,04,525.99 | ₹1,199.40 | ₹1,03,326.59 | 21.1% |
+| **B4** · blast reminders at everything | 8/310 | 2.6% | ₹96,028.12 | ₹120.12 | ₹95,908.00 | 19.4% |
+| **B3** · oracle (ceiling) | 129/310 | 41.6% | ₹4,94,721.65 | ₹666.04 | ₹4,94,055.61 | **100.0%** |
+| **RC** · Recovery Controller | **80/310** | **25.8%** | **₹3,03,937.16** | **₹375.42** | **₹3,03,561.74** | **61.4%** |
 
 **Negative expected-value attempts**, priced against the *published* priors — the evidence
 available beforehand, not hindsight:
 
 | Arm | Wasted attempts | ₹ spent on them |
 |---|---|---|
-| B1 | 97 of 171 | ₹260.00 |
-| B2 | **345 of 435** | ₹923.80 |
-| B4 | **518 of 557** | ₹100.88 |
-| RC | **0 of 290** | ₹0.00 — the gate refuses them by construction |
+| B1 | 120 of 199 | ₹340.50 |
+| B2 | **365 of 455** | ₹1,004.60 |
+| B4 | **502 of 540** | ₹94.18 |
+| RC | **0 of 296** | ₹0.00 — the gate refuses them by construction |
+
+<sub>328 rather than 300 because the two material degradation episodes each contribute 14
+recovery cases inside their window — an outage *causes* a burst of failures, and modelling it
+otherwise left the detector with nothing to act on ([entry 22](FAILURES.md)). The share of the
+ceiling moved 62.5% → 61.4% as a result: those cases arrive in a cohort whose authorisation
+host is failing, which is the population the controller is most constrained on and the oracle
+least.</sub>
 
 **% of ceiling is value recovered against the oracle's, not net against net.** The oracle
 assumes every customer is reachable, so it sends messages the controller's consent bounds
@@ -50,9 +57,9 @@ hide. So it is broken out, against the oracle's ceiling **for that class**:
 
 | Risk class | Txns | Fired | Recovered | Refused | ₹ net | ₹ ceiling | % of ceiling |
 |---|---|---|---|---|---|---|---|
-| `payment_failure` | 108 | 137 | 44/104 | 64 | ₹1,98,530 | ₹2,08,808 | **95.2%** |
+| `payment_failure` | 136 | 144 | 48/121 | 88 | ₹2,04,586 | ₹2,27,213 | **90.2%** |
 | `subscription_failure` | 63 | 69 | 20/63 | 43 | ₹15,555 | ₹23,175 | **67.5%** |
-| `checkout_abandonment` | 62 | 42 | 4/62 | 58 | ₹6,942 | ₹8,705 | **79.8%** |
+| `checkout_abandonment` | 62 | 41 | 4/62 | 58 | ₹6,942 | ₹8,705 | **79.8%** |
 | `receivable_overdue` | 44 | 20 | 6/41 | 38 | ₹76,078 | ₹2,34,064 | **32.5%** |
 | `mandate_lapsed` | 23 | 22 | 2/23 | 21 | ₹401 | ₹1,565 | **25.9%** |
 
@@ -69,15 +76,17 @@ answer is a number, not a paragraph:
 
 | Rule | Refusals | ₹ expected recovery forgone | Share |
 |---|---|---|---|
-| `consent` | 86 | ₹1,70,547 | **88.3%** |
-| `contact_ceiling` | 17 | ₹21,707 | 11.2% |
+| `consent` | 86 | ₹1,70,547 | **85.2%** |
+| `contact_ceiling` | 18 | ₹21,721 | 10.8% |
+| `issuer_degraded` | 9 | ₹6,935 | 3.5% |
 | `never_contact` | 3 | ₹759 | 0.4% |
+| `fraud_rule_active` | 2 | ₹85 | 0.0% |
 | `ev_floor` | 9 | ₹49 | 0.0% |
 | `min_gap` | 1 | ₹49 | 0.0% |
 | `promise_open` | 1 | ₹17 | 0.0% |
-| `attempt_cap` / `terminal` | 107 | ₹0 | 0.0% |
+| `attempt_cap` / `terminal` | 119 | ₹0 | 0.0% |
 
-**₹1,93,127 across 224 refusals, and 88% of it is consent.** Forty percent of the seeded
+**₹2,00,163 across 248 refusals, and 85% of it is consent.** Forty percent of the seeded
 customer book has either opted out or never opted in. Checkout abandonment and overdue
 receivables recover money by messaging and nothing else — there is no charge to re-present —
 so a customer who cannot be messaged cannot be recovered, and the oracle is permitted to
@@ -95,14 +104,14 @@ Whatever separates them is the value of *knowing why the payment failed*.
 
 | | Attempts fired | Recovered | Per-attempt hit rate | ₹ spent | ₹ net |
 |---|---|---|---|---|---|
-| **B2** | 435 | 50 | 11.5% | ₹1,118.60 | ₹95,876 |
-| **RC** | **290** | **76** | **26.2%** | **₹357.82** | **₹2,97,506** |
+| **B2** | 455 | 57 | 12.5% | ₹1,199.40 | ₹1,03,327 |
+| **RC** | **296** | **80** | **27.0%** | **₹375.42** | **₹3,03,562** |
 
-**RC recovered 52% more transactions while firing 33% fewer attempts and spending 68%
-less** — 2.3× the per-attempt hit rate, and 3.1× the net value. That is targeting isolated
+**RC recovered 40% more transactions while firing 35% fewer attempts and spending 69%
+less** — 2.2× the per-attempt hit rate, and 2.9× the net value. That is targeting isolated
 from persistence.
 
-B2 also fired **345 of its 435 attempts at negative expected value**, because a fixed cadence
+B2 also fired **365 of its 455 attempts at negative expected value**, because a fixed cadence
 re-presents expired cards and revoked mandates with the same enthusiasm as a transient
 timeout. It is not a strawman — it is what dunning tools actually ship.
 
@@ -118,10 +127,10 @@ transaction on a fixed cadence, no diagnosis, no expected-value gate, no contact
 respects template registration, because that is a legal constraint rather than a policy
 preference and a baseline that broke it would not correspond to anything anyone could run.
 
-It fired **557 messages to recover 9 transactions** — 518 of those attempts at negative
-expected value. The controller sent fewer messages and recovered eight times as much value,
-which is the difference between knowing that an OTP drop-off is worth chasing within minutes
-and a browsing cart may not be worth chasing at all.
+It fired **540 messages to recover 8 transactions** — 502 of those attempts at negative
+expected value. The controller sent fewer messages and recovered **ten times as many
+transactions** for **3.2× the net value**, which is the difference between knowing that an OTP
+drop-off is worth chasing within minutes and a browsing cart may not be worth chasing at all.
 
 ### The gap to the ceiling is stated, not hidden
 
@@ -147,13 +156,13 @@ one lives so a reader can check rather than take the claim on trust.
 
 | Brief direction | Mechanism | Where |
 |---|---|---|
-| **Smart retry policy** — root-cause diagnosis, per-cause timing and rail | 18-code taxonomy where a class exists only if it earns a distinct intervention; timing buckets carry the priors; `switch_rail` for authentication failures | [`taxonomy.ts`](packages/core/src/taxonomy.ts), [`policy.default.yaml`](packages/policy/policy.default.yaml) |
+| **Payment degradation → root cause → recovery action** | All three segments of the arrow, and the first is the one a per-transaction system cannot do. **Degradation:** a rolling 30-minute window over the merchant's whole authorisation stream — successes included, because a queue of failures has no denominator — judging each `(issuer, rail)` cohort against **its peers in the same window** rather than a fixed threshold, so an alert means "unusual right now" and not "it is evening". **Root cause:** which code the cohort's failures concentrate on, plus an 18-code taxonomy where a class exists only if it earns a distinct intervention. **Recovery action:** the cause selects timing and rail, and a detected cohort changes that action rather than only its odds — `issuer_outage` refuses the re-presentment and lets a rail switch through, `fraud_rule` refuses the switch too, because a fraud decline travels with the card. Measured against episodes the detector cannot see: **100% recall, 100% precision, 20-min mean delay** | [`detect.ts`](packages/detect/src/detect.ts), [`taxonomy.ts`](packages/core/src/taxonomy.ts), [`014_degradation.sql`](packages/db/migrations/014_degradation.sql) |
 | **Mandate retry sequencer** — sequenced retries in the permitted window, with pre-debit notification | A charge on a mandate rail is **refused** unless a notification was *delivered* ≥24h earlier. Read from `message_send`, not from the decision that planned it — a notice suppressed by quiet hours never reached the customer, so the debit is still unlawful | `pre_debit_notice` bound in [`bounds.ts`](packages/policy/src/bounds.ts) |
 | **Failed-subscription recovery** — value is the relationship, not the cycle | Value term multiplies by `lifetime_cycles`, so the same probability justifies several times the spend. Reported separately from cash, never added to it | `valueCycles` in [`ev.ts`](packages/policy/src/ev.ts) |
 | **Checkout drop-off recovery** — messaging only, no gateway fee | Four separate causes by funnel stage, because their recovery rates differ by more than 5×. Nothing was charged, so no fee applies — the whole cost is 18 paise, which is why a link clears the floor where a ₹3.50 retry cannot | `checkout_abandonment` class, `incursGatewayFee` in [`risk.ts`](packages/core/src/risk.ts) |
 | **B2B receivables chaser** — escalation ladder, payment-run timing, hard stop | Five causes with five strategies. The ladder climbs **channel** rather than volume — two messages, then one call — and stops. A disputed invoice gets a human immediately and no automated contact at all | `receivable_overdue` class |
 | **Promise-to-pay tracker** — a suppression mechanism first | An open promise **blocks** the ladder until its date and records `await_promise` rather than `none`, so the audit trail distinguishes deliberate waiting from an idle invoice. A broken promise changes the action, not just the odds: straight to a call, then a human | `promise` table, `promise_open` bound |
-| **Hinglish voice recovery** — voice as a channel, not a louder SMS | Registered voice scripts (Hinglish variants selected by `preferred_language`), NCPR/DND registry override, a narrower 10:00–19:00 calling window, one call per week, and ~22× the cost of an SMS — so the expected-value gate decides between a message and a call | `voice` channel, [`templates.ts`](packages/simulator/src/templates.ts) |
+| **Hinglish voice recovery** — voice as a channel, not a louder SMS | Registered voice scripts (Hinglish variants selected by `preferred_language`), NCPR/DND registry override, a narrower 10:00–19:00 calling window, one call per week, and ~22× the cost of an SMS — so the expected-value gate decides between a message and a call. **And it is audible**: `pnpm voice --speak` synthesises the registered script through Sarvam Bulbul or Gemini TTS. The model fills an approved template and composes nothing — stricter than the SMS path, because a call leaves no artifact to review after the fact | `voice` channel, [`@rc/voice`](packages/voice/src/providers.ts), [`templates.ts`](packages/simulator/src/templates.ts) |
 
 **What the generalisation actually cost.** Five classes, one engine — not five systems. The
 classes differ in exactly three ways, and all three were already inputs the expected-value gate
@@ -445,7 +454,13 @@ the calibration reliability diagram, and every one of the 199 refusals with the 
 that produced it.
 
 Also available: `pnpm ablate` (classifier ablation in rupees), `pnpm sweep` (sensitivity +
-hostile worlds), `pnpm propose` (the bounded improvement loop).
+hostile worlds), `pnpm propose` (the bounded improvement loop), `pnpm razorpay` (real
+test-mode Payment Links) and `pnpm voice` (synthesise a registered Hinglish call script).
+
+The last two are **dry runs by default**: with no key configured they print the exact request
+that would be sent and the exact script that would be spoken, so both integrations are
+inspectable with no credentials and no network. `--speak` and `--live` are what reach a third
+party.
 
 `pnpm demo` is `db:reset && seed && eval`. The steps also run individually; `pnpm eval`
 **refuses** to run twice against the same batch, because a second run would continue the
@@ -476,10 +491,11 @@ validates its configuration at boot and fails immediately if anything is missing
 
 ## Architecture
 
-**→ [`ARCHITECTURE.md`](ARCHITECTURE.md) — thirteen diagrams, rendered.** The package graph and
-the wall through it, the full refusal decision tree, one decision traced end to end, the
-crash-resume protocol, the data model with every invariant the database enforces, the six-arm
-harness, and the trust boundaries. Every name and edge in it is taken from the source.
+**→ [`ARCHITECTURE.md`](ARCHITECTURE.md) — fifteen diagrams across thirteen sections.** The
+agent loop, the package graph and the wall through it, the full refusal decision tree, one
+decision traced end to end, the crash-resume protocol, the data model with every invariant the
+database enforces, the six-arm harness, and the trust boundaries. Every name and edge in it is
+taken from the source.
 
 ```
 revenue at risk → classify → POLICY ENGINE → EV GATE → BOUNDS → worker → audit
@@ -527,7 +543,7 @@ Diagrams: [`ARCHITECTURE.md`](ARCHITECTURE.md). Build history:
 | 7c · Calibration | ✅ **model is overconfident; threshold chosen from the curve** |
 | 7d · Policy-proposal loop | ✅ **agent proposes, human decides, held-out measures** |
 | 8 · Surface — generated report | ✅ **self-contained, offline, 4 charts** |
-| 8b · Operations console — Next.js, 5 routes | ✅ **Server Components, no API layer** |
+| 8b · Operations console — Next.js, 7 routes | ✅ **Server Components, no API layer** |
 | 9 · **All five risk classes** — one engine, per-class proof | ✅ **found 7 bugs, 5 of which inflated our own numbers** |
 | 9b · B4 messaging baseline + per-class ceiling | ✅ **the classes with no retry now have a real comparator** |
 | 9c · Cost of the guardrails, in rupees | ✅ **88% of the shortfall is consent, and it is stated** |
@@ -540,14 +556,20 @@ Diagrams: [`ARCHITECTURE.md`](ARCHITECTURE.md). Build history:
 pnpm verify   # typecheck + lint + boundaries + tests
 ```
 
-**138 tests, 12 files.** 20 skip cleanly with an explanation when Docker is not running rather
-than failing with a wall of connection errors.
+**239 tests, 16 files.** 21 of them talk to a live Postgres and skip cleanly with an
+explanation when Docker is not running, rather than failing with a wall of connection errors.
 
 [`FAILURES.md`](FAILURES.md) records the bugs that mattered — what broke, how it was found, and
-what it cost. Nineteen entries. **Five of them inflated this system's own reported results**,
-and those are listed first, because a bug that flatters the author is the one a reader most
-needs to know was looked for. Three were found by a robustness check rather than by a test,
-which is the argument for having them: the interesting failures here were all silent.
+what it cost. Twenty-four entries. **Seven of them inflated this system's own reported
+results**, and one did something worse: it disabled a guarantee that exists to prevent exactly
+that kind of error. Those are marked, because a bug that flatters the author is the one a
+reader most needs to know was looked for. Several were found by a robustness check rather than
+by a test, which is the argument for having them: the interesting failures here were all
+silent.
+
+One entry runs the other way. A rate limit was being reported as a cautious model, which made
+the LLM look worthless when the honest finding was that it captures **97.8%** of the achievable
+ceiling. Keeping only the flattering mistakes would be its own kind of selective accounting.
 
 - **The Chinese wall** is enforced in two independent layers, and both were verified by
   deliberately adding a forbidden import and confirming each one fails:

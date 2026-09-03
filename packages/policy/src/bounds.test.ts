@@ -16,7 +16,14 @@ import {
   NO_COHORT_RISK,
   type CohortRisk,
 } from '@rc/core';
-import { checkAttemptBounds, checkContactBounds, type ConsentState } from './bounds.js';
+import {
+  ALL_REFUSAL_REASONS,
+  ATTEMPT_BOUNDS,
+  CONTACT_BOUNDS,
+  checkAttemptBounds,
+  checkContactBounds,
+  type ConsentState,
+} from './bounds.js';
 import { buildPolicy, loadPolicy, type Policy } from './policy.js';
 
 /**
@@ -577,5 +584,35 @@ describe('what the population says', () => {
     );
 
     expect(verdict.kind).toBe('allow');
+  });
+});
+
+describe('the documented refusal vocabulary', () => {
+  it('pins the count that ARCHITECTURE.md §5 claims is complete', () => {
+    // A DOCUMENTATION LOCK, and it exists because that claim was wrong twice: first it
+    // omitted the two detection bounds, then it stated the total as sixteen when the union
+    // came to nineteen. Prose promising completeness needs something that fails when it
+    // stops being complete.
+    //
+    // If this test fails, a bound was added or removed. That is fine — update the number in
+    // ARCHITECTURE.md §5 and here, in that order.
+    expect(ALL_REFUSAL_REASONS).toHaveLength(19);
+  });
+
+  it('counts kill_switch once, because it is one reason and not two', () => {
+    // It is a member of both bound sets. Concatenating rather than uniting would report 20.
+    expect(ATTEMPT_BOUNDS).toContain('kill_switch');
+    expect(CONTACT_BOUNDS).toContain('kill_switch');
+    expect(ALL_REFUSAL_REASONS.filter((reason) => reason === 'kill_switch')).toHaveLength(1);
+  });
+
+  it('every bound the checker can return is in the enumeration', () => {
+    // The arrays are the source of the types, so this cannot drift by construction — which
+    // is exactly why they replaced the bare unions. Asserted anyway, because the property
+    // that makes the count trustworthy is worth stating where a reader will see it.
+    const declared = new Set<string>(ALL_REFUSAL_REASONS);
+    for (const bound of [...ATTEMPT_BOUNDS, ...CONTACT_BOUNDS]) {
+      expect(declared.has(bound), `${bound} is missing from ALL_REFUSAL_REASONS`).toBe(true);
+    }
   });
 });

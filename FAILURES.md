@@ -7,9 +7,21 @@ Each entry says what the symptom was, how it was actually found, why it was expe
 what now prevents it. Several were found by a robustness check rather than by a test — which
 is the argument for having them.
 
-The ones marked **▲** inflated this system's own reported results. Those are recorded first
-in each section, because a bug that flatters the author is the one a reader most needs to
-know was looked for.
+Two markers, because they are different kinds of bad:
+
+- **▲** — the bug **inflated this system's own reported results**. Seven of them (1–7). A bug
+  that flatters the author is the one a reader most needs to know was looked for.
+- **▲▲** — the bug **disabled a guarantee that exists to prevent an inflated result**. One
+  of them (20), and it is one level worse, because it removes the thing that would have caught
+  the first kind.
+
+Entries are numbered in the order they were found rather than by severity, so the markers and
+not the position are how to find the ones that matter. **If you read one, read 20.**
+
+Not every bug here flattered the system. **21** did the opposite: it made the model look
+worthless when the honest finding was that it captures 97.8% of the achievable ceiling. An
+error in that direction is just as much a reporting failure, and keeping only the flattering
+ones would be its own kind of selective accounting.
 
 ---
 
@@ -415,6 +427,192 @@ reader, and would have broken it for a judge:
   explanation.
 - I wrote UTF-8 BOMs into `package.json` and three other files with PowerShell's
   `Set-Content -Encoding utf8`, which broke dependency-cruiser. All stripped.
+
+---
+
+## 20. ▲▲ The Chinese wall's second layer had never run
+
+The worst defect found on this project, and it was in the thing the project is proudest of.
+
+**Symptom.** None available. The README, `ARCHITECTURE.md` and the landing page all claimed
+the wall was enforced by **two independent checks** — an ESLint rule on the import specifier
+and a dependency-cruiser rule on the resolved graph. Every run of `pnpm lint:boundaries` had
+passed for the life of the repository, which is exactly what a working check looks like.
+
+**How it was found.** By injecting the breach rather than by reading the config. With
+`import { loadTruthModel } from '@rc/simulator'` at the top of `packages/policy/src/ev.ts`,
+the dependency declared in `package.json` and a `tsconfig` reference added,
+`pnpm lint:boundaries` reported *"no dependency violations found (113 modules, 210
+dependencies cruised)"* — and the JSON graph showed `ev.ts` with **zero dependencies**. Not
+the wrong ones; none at all. Only ESLint objected.
+
+So "two independent layers" was one layer and a decoration, and every `reachable: true` rule
+in the file was inert: `chinese-wall-policy-to-sim`, `chinese-wall-sim-to-policy`,
+`no-simulator-in-production-paths`, `razorpay-client-decides-nothing`,
+`no-razorpay-in-the-measurement`.
+
+**Why.** pnpm resolves a workspace import through `packages/policy/node_modules/@rc/core`;
+dependency-cruiser follows that symlink to its real target, so the edge arrives as
+`packages/core/dist/index.js`. `dist` was excluded — and `exclude` **deletes** a module from
+the graph rather than keeping it as a leaf, which is the distinction the config's own header
+note was already warning about. Every workspace edge vanished before a rule could see it. 210
+of the "dependencies cruised" were intra-package; the graph was nine disconnected islands.
+
+**What it cost.** Nothing measured, and that is the point: had a forbidden import ever been
+added, the check that exists to catch it would have passed, and every recovery number here
+would have been a tautology dressed as an inference. The config's header note said excluding
+node_modules was what broke the wall the first time. The note was right, and the pattern did
+it again one directory deeper.
+
+**Two dead ends, recorded because each looked right.** Anchoring the exclusion to
+`packages/*/dist` changes nothing — symlink resolution is exactly what lands edges there.
+Dropping the exclusion entirely puts compiled output in the graph, where the parser dies on
+`Unexpected template string` and then *no* rule runs at all.
+
+**What prevents it.** `tsconfig.depcruise.json` maps `@rc/*` to `packages/*/src/index.ts`, so
+a cross-package import resolves to source: the graph is source-to-source, `dist` stays
+excluded, and reachability has a connected graph to search. Kept out of `tsconfig.base.json`
+deliberately — `paths` there would let a developer import across packages without declaring
+the dependency and have the build accept it, trading one silently-disabled guarantee for
+another. Both walls re-verified by injection rather than inspection:
+
+| | before | after |
+|---|---|---|
+| dependencies cruised | 210 | **337** |
+| violations on an injected `policy → simulator` breach | **0** | 99 |
+| violations on an injected `detect → simulator` breach | 0 | 27 |
+
+**The general lesson.** A rule nobody has tried to break is not a rule. This is the second
+time on this project that a guarantee passed while being violated, and both times the rule
+was written correctly and evaluated over the wrong graph.
+
+---
+
+## 21. A rate limit reported as a cautious model
+
+**Symptom.** The first live LLM ablation said the model was worthless: level with a free
+keyword table, having declined to label 26 of 40 transactions. That reads as a conservative
+classifier earning its quarantine threshold.
+
+**How it was found.** By querying `llm_call` for the failure reasons behind the quarantines.
+Thirteen of the 26 were Groq HTTP 429s; on Gemini it was 19 of 40.
+
+**Why it was expensive.** A call that never happened arrived at the report identically to one
+where the model read the string and abstained — both surface as `quarantined: true` with
+`reasonCode: 'unknown'`. The report was describing throttling and calling it judgement, which
+is a conclusion about the wrong thing entirely. No ▲: this one ran in the other direction and
+understated the system, which is exactly as much a reporting failure.
+
+**What it cost.** With the calls actually landing (25 of 25, zero failures) the finding
+inverts. Same policy, same population, only the classifier swapped:
+
+| classifier | accuracy | on hard strings | % of legal ceiling | model cost |
+|---|---|---|---|---|
+| keyword | 56.6% | 68.6% | 26.5% | ₹0.00 |
+| gemini-3.1-flash-lite | 69.9% | **94.1%** | **97.8%** | ₹0.25 |
+
+**What prevents it.** Transport failures are counted apart from quarantines and `pnpm ablate`
+gained a `failed` column, so a throttled run is visible as one. The retry ceiling went from
+8s over 4 attempts to 15s over 6 — free tiers throttle by the minute and waiting is the only
+thing that helps — and `CLASSIFY_CONCURRENCY` defaults to 2, because without jitter every
+worker in a throttled window comes back at the same instant and is throttled again.
+
+---
+
+## 22. Detection that changed nothing
+
+**Symptom.** The degradation detector found both seeded episodes with 100% precision and
+recall, and changed **not one decision**. Every table said it worked.
+
+**How it was found.** By querying `decision.refuse_rule` for the two bounds the detector is
+supposed to create, and getting zero rows.
+
+**Why.** The authorisation stream is a ten-hour band; the 300 recovery cases are drawn
+independently across seven days. So essentially none of them belonged to an affected cohort at
+an affected time, and the signal had nothing to act on.
+
+**What it cost.** Nothing yet, and it was one commit from costing the submission its
+credibility — a feature wired up and never firing is worse than an absent one, because the
+wiring reads as evidence.
+
+**What prevents it.** The temptation was to widen a threshold until something happened, which
+would have manufactured the effect. The fix models the real pipeline instead: an outage
+*causes* a burst of failures, and those failures *are* recovery cases. `planOutageCases` seeds
+14 per material episode, inside the window, on the affected cohort — modest on purpose, since
+an outage cohort large enough to move the headline would be choosing the result rather than
+showing the mechanism. The signal is now load-bearing: 9 `issuer_degraded` refusals, 2
+`fraud_rule_active`, and `switch_rail` up from 32 to 35 — the detection changing the *action*
+rather than merely suppressing one.
+
+**A second bug inside the first.** `loadAuthStream` joined only `classification`, which exists
+for the few hundred triaged failures out of fourteen thousand. Every signal therefore carried
+`dominantCode: null`, and the fraud-rule episode was reported as an issuer outage — the right
+cohort with the wrong cure, which is the one combination that actively harms: switching rails
+to evade a risk engine is futile, and at volume it is how a merchant loses its acquirer.
+
+---
+
+## 23. Prompt-injection resistance we assumed and never had
+
+**Symptom.** `strings.ts` had promised since it was written that "any classification of one is
+recorded so the report can state how the system behaved under attack instead of claiming it
+was never tried." No number anywhere said what happened to them; a test asserted only that the
+attacks parse safely.
+
+**How it was found.** By writing the measurement the comment promised — and then finding the
+first version of it worthless.
+
+**Why the first version was worthless.** It read the persisted batch: join the planted
+descriptions to their classifications and count how many got the demanded label. It reported
+**zero steered**, which looks like a security result and measured nothing. `pnpm eval`
+classifies with the **oracle**, which reads the simulator's seeded cause and never looks at
+the description. An attack cannot steer a classifier that does not read it.
+
+**What the real measurement says.** Against the keyword classifier over the declared corpus,
+**3 of 4** label-naming attacks land their demand exactly. "The keyword baseline cannot be
+steered, because it has no instruction-following surface" is true and irrelevant: it cannot be
+*persuaded*, and it is steered anyway by the cheaper attack — write `network_timeout` into the
+text and a keyword matcher will match it.
+
+**Why that is worth publishing.** It points against the convenient answer. The free classifier
+is not the conservative choice here; it is the one that loses to a single line of text, which
+belongs beside its 26.5%-of-ceiling economics rather than buried. The one attack it resists is
+resisted for an accidental reason — a genuine cause sits in front of the demand and the
+matcher reaches it first — so the resistance is an artifact of keyword order rather than
+judgement, and a test now pins that distinction.
+
+**What holds absolutely, and what does not.** Output is validated against the taxonomy before
+anything reads it, and `classification.reason_code` is a foreign key to the seeded
+`reason_code` table, so a code outside the eighteen cannot be stored. And a cause only ever
+*indexes into* the policy — it selects a schedule row, it cannot become one — which is why the
+attack demanding "unlimited retries" has nothing to attack. Neither layer covers being steered
+to a label that IS in the taxonomy but wrong, and the report now states the size of that gap
+instead of implying it is closed.
+
+---
+
+## 24. A layout comment describing a fix that was never written
+
+**Symptom.** The landing page's agent-loop band rendered with columns roughly 60px wide,
+wrapping one word per line, rows visibly misaligned.
+
+**Why.** `.flow` is a five-track grid — `1fr auto 1fr auto 1fr`, so steps stretch and
+connectors take 34px — which means one row holds exactly three steps and two connectors, and
+the child count must be a multiple of five. Going from three steps to six gave it **eleven**
+children. Row one filled correctly, then row two started one track late, so every step landed
+in a 34px connector track.
+
+**What made it worse.** The CSS comment left beside it described "an explicit 11-column track"
+as though that were the fix. It was never written — the template still said
+`1fr auto 1fr auto 1fr`. A comment asserting a layout the file does not have is how the next
+reader spends an hour looking in the wrong place, and it is the same failure mode as entries
+20 and 23: an assertion in prose that no check was holding to account.
+
+**What prevents it.** The connector between 03 and 04 is gone, so there are ten children and
+two rows exactly in phase — verified against the rendered DOM rather than by eye. A
+`:nth-of-type(3)` rule meant to rotate the row-ending connector was also removed:
+`nth-of-type` counts among siblings of the same element type, and every child there is a
+`div`, so it was rotating an arbitrary arrow.
 
 ---
 

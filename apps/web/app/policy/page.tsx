@@ -161,10 +161,24 @@ export default async function Policy() {
       )}
 
       <div className="callout">
-        <strong>The agent proposes; a person decides.</strong> Approved changes are measured
-        on a <em>held-out seed</em> before they are believed — a change tuned on one batch
-        that only helps that batch has learned the noise. One approved proposal here predicted
-        +₹2,067 and measured −₹11,935 on unseen data, which is exactly why the step exists.
+        <strong>The agent proposes; a person decides.</strong> Approving a change with{' '}
+        <code className="mono">pnpm propose --approve &lt;id&gt;</code> applies it and then
+        re-runs the whole evaluation on a <em>held-out seed</em> (99 by default), printing the
+        measured delta beside the predicted one. A change tuned on one batch that only helps
+        that batch has learned the noise, and the only way to find that out is to try it on a
+        population it has never seen.
+      </div>
+
+      <div className="callout warn">
+        <strong>The held-out result is printed, not stored.</strong>{' '}
+        <code className="mono">policy_proposal</code> has a{' '}
+        <code className="mono">predicted_net_delta_paise</code> column and no measured
+        counterpart, so the comparison that decides whether a proposal was any good lives in a
+        terminal and not in the audit trail. That is a real gap in a system whose whole
+        argument is that claims should be checkable — this page used to quote one such
+        comparison from memory (&ldquo;predicted +₹2,067, measured −₹11,935&rdquo;), which was
+        exactly the kind of unverifiable figure it criticises elsewhere. The number is gone;
+        the column it needs is not yet there.
       </div>
     </>
   );

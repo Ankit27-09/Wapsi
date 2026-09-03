@@ -3,7 +3,15 @@ import { KEYWORD_CLASSIFIER } from '@rc/ai';
 import { PaiseSchema, ZERO, add, formatINR, type Paise } from '@rc/core';
 import { createDb, type Arm as ArmId, type Db } from '@rc/db';
 import { buildPolicy, loadPolicy, loadPriorTable } from '@rc/policy';
-import { createRng, loadTruthModel, perturbedTruth } from '@rc/simulator';
+import { loadSignals, scoreDetection } from '@rc/detect';
+import {
+  SIM_EPOCH,
+  createRng,
+  loadTruthModel,
+  materialOutages,
+  perturbedTruth,
+} from '@rc/simulator';
+import { scoreInjections } from './injection.js';
 import { calibrate, scoreClassifier } from './ablation.js';
 import { armById, ARMS } from './arms.js';
 import { hostileWorlds } from './hostile.js';
@@ -153,6 +161,39 @@ function valueFrontier(count: number, seed: number): {
   return { points, marker: { x: Number(base.evFloor), y: Number(shipped.net) / 100 } };
 }
 
+/**
+ * Failure rate per (issuer, rail) across the whole authorisation stream.
+ *
+ * The report needs the cohorts that were NOT flagged as much as the ones that were: a table
+ * of detections alone cannot distinguish a detector that found two real problems from one
+ * that alerts on everything and happened to be right twice.
+ */
+async function cohortRates(
+  db: Db,
+  batchId: string,
+): Promise<readonly { issuer: string; rail: string; attempts: number; failures: number }[]> {
+  const rows = await db
+    .selectFrom('auth_attempt')
+    .select(({ fn }) => [
+      'issuer_id',
+      'rail',
+      fn.countAll<string>().as('attempts'),
+      fn.count<string>('id').filterWhere('succeeded', '=', false).as('failures'),
+    ])
+    .where('batch_id', '=', batchId)
+    .groupBy(['issuer_id', 'rail'])
+    .execute();
+
+  return rows
+    .map((row) => ({
+      issuer: row.issuer_id,
+      rail: row.rail,
+      attempts: Number.parseInt(row.attempts, 10),
+      failures: Number.parseInt(row.failures, 10),
+    }))
+    .sort((a, b) => b.failures / b.attempts - a.failures / a.attempts);
+}
+
 function table(headers: readonly string[], rows: readonly (readonly string[])[]): string {
   const head = headers.map((h) => `<th>${escapeXml(h)}</th>`).join('');
   const body = rows
@@ -216,6 +257,22 @@ async function main(): Promise<void> {
 
     const exceptions = await gatherExceptions(db, { seed, arm: 'rc' });
 
+    // ---- detection, and how it behaved under attack -----------------------
+    // Both read the run that already happened rather than re-deriving anything, so the report
+    // cannot disagree with the database it claims to describe.
+    const rcBatch = await db
+      .selectFrom('batch')
+      .select('id')
+      .where('seed', '=', seed)
+      .where('arm', '=', 'rc')
+      .where('world', '=', 'base')
+      .executeTakeFirstOrThrow();
+
+    const signals = await loadSignals(db, rcBatch.id);
+    const detection = scoreDetection(signals, materialOutages(loadTruthModel().outages, SIM_EPOCH));
+    const cohorts = await cohortRates(db, rcBatch.id);
+    const injections = await scoreInjections(KEYWORD_CLASSIFIER, 'keyword');
+
     // ---- render -----------------------------------------------------------
     const html = render({
       seed,
@@ -230,6 +287,10 @@ async function main(): Promise<void> {
       keyword,
       calibration,
       exceptions,
+      signals,
+      detection,
+      cohorts,
+      injections,
     });
 
     await mkdir(OUT_DIR, { recursive: true });
@@ -260,6 +321,10 @@ interface RenderArgs {
   readonly keyword: Awaited<ReturnType<typeof scoreClassifier>>;
   readonly calibration: ReturnType<typeof calibrate>;
   readonly exceptions: readonly ExceptionRow[];
+  readonly signals: Awaited<ReturnType<typeof loadSignals>>;
+  readonly detection: ReturnType<typeof scoreDetection>;
+  readonly cohorts: Awaited<ReturnType<typeof cohortRates>>;
+  readonly injections: Awaited<ReturnType<typeof scoreInjections>>;
 }
 
 function render(args: RenderArgs): string {
@@ -469,6 +534,125 @@ beside it, where a difference in spending is visible rather than baked into the 
 <p>Priced against the <em>published</em> priors — the evidence available beforehand, not
 hindsight. The controller's zero is structural: the gate refuses them.</p>
 ${wasteTable}
+
+<h2>Detection — before any decision was made</h2>
+<p>The brief's first verb. Everything above measures what the agent DID; this is what it
+noticed first, and it is a different kind of evidence: the rest of this report could be
+produced by a well-tuned rules engine, and this section could not, because no per-transaction
+rule can see a cohort going bad.</p>
+
+<p><strong>${args.cohorts.reduce((total, c) => total + c.attempts, 0).toLocaleString('en-IN')}</strong>
+authorisations watched across <strong>${args.cohorts.length}</strong> cohorts, both outcomes.
+The successes are not decoration — they are the denominator, and without them no rate is
+computable and "detects revenue at risk" cannot be true of a queue of failures.</p>
+
+${table(
+    ['cohort', 'verdict', 'observed', 'peer baseline', 'lower bound', 'n', 'knew after', 'root cause'],
+    args.signals.map((signal) => [
+      `<code>${signal.issuerId}</code> ${signal.rail}`,
+      `<code>${signal.verdict}</code>`,
+      formatRate(signal.observedBps),
+      formatRate(signal.baselineBps),
+      formatRate(signal.lowerBoundBps),
+      String(signal.attempts),
+      `${Math.round((signal.firstSeenAt.getTime() - signal.windowStart.getTime()) / 60_000)} min`,
+      `<code>${signal.dominantCode ?? '—'}</code>`,
+    ]),
+  )}
+
+<p class="lede">Against the episodes the simulator actually created — which the detector cannot
+see — recall <strong>${formatRate(args.detection.recallBps)}</strong>
+(${args.detection.found} of ${args.detection.outages}), precision
+<strong>${formatRate(args.detection.precisionBps)}</strong>
+(${args.detection.falsePositives} false positive${args.detection.falsePositives === 1 ? '' : 's'}),
+mean detection delay <strong>${
+    args.detection.meanDelayMinutes === null
+      ? '—'
+      : `${args.detection.meanDelayMinutes.toFixed(0)} min`
+  }</strong>.</p>
+
+<h3>Every cohort, including the ones left alone</h3>
+<p>Restraint is the harder half, and a table of detections alone cannot show it. One episode in
+<code>priors.truth.yaml</code> is marked <code>material: false</code> — a real elevation, on real
+volume, that is not worth moving anybody's traffic over. Reporting it costs precision; missing it
+costs nothing. A detector tuned until this page looked impressive fails there.</p>
+
+${table(
+    ['issuer', 'rail', 'authorisations', 'failure rate', 'reported?'],
+    args.cohorts.slice(0, 12).map((cohort) => {
+      const flagged = args.signals.some(
+        (signal) => signal.issuerId === cohort.issuer && signal.rail === cohort.rail,
+      );
+      return [
+        `<code>${cohort.issuer}</code>`,
+        cohort.rail,
+        cohort.attempts.toLocaleString('en-IN'),
+        formatRate(Math.round((cohort.failures / cohort.attempts) * 10_000)),
+        flagged ? '<strong>reported</strong>' : 'within peers',
+      ];
+    }),
+  )}
+
+<div class="callout">
+  <strong>The verdict decides the cure, and two of them are opposites.</strong>
+  <code>issuer_outage</code> forbids re-presenting on that rail and lets a switch through —
+  the detection changes the <em>action</em>, which is what "root cause → recovery action"
+  means. <code>fraud_rule</code> forbids the switch too, because a fraud decline travels with
+  the card rather than the rail: evading one is futile, and at volume it is how a merchant's
+  acquirer relationship gets reviewed. Getting that precedence backwards would have the system
+  hammer a risk engine working exactly as intended.
+</div>
+
+<h2>Under attack</h2>
+<p><code>gateway_description</code> is untrusted free text that flows into a model prompt, and a
+misclassification spends money. Five attacks are planted in the corpus and each one declares the
+label it is trying to force, so &ldquo;was it steered&rdquo; is answerable rather than
+rhetorical.</p>
+
+${table(
+    ['attack shape', 'demanded', 'produced', 'steered?'],
+    args.injections.outcomes.map((outcome) => [
+      `<code>${outcome.kind}</code>`,
+      outcome.demands === null ? 'a policy change, not a label' : `<code>${outcome.demands}</code>`,
+      `<code>${outcome.assigned}</code>`,
+      outcome.steered ? '<strong>yes</strong>' : 'no',
+    ]),
+  )}
+
+<p class="lede"><strong>${args.injections.steered} of ${args.injections.steerable}</strong>
+steerable attacks produced the label the attacker named, against
+<code>${args.injections.classifier}</code>.
+<strong>${args.injections.escapedTaxonomy}</strong> produced a code outside the taxonomy.</p>
+
+<div class="callout warn">
+  <strong>This is a finding, not a boast.</strong> The keyword baseline has no
+  instruction-following surface, so it cannot be <em>persuaded</em> — and it is steered anyway,
+  by the simplest attack available: write the label you want into the text and a keyword matcher
+  will match it. Same outcome, cheaper attack. So the free classifier is not the safe choice
+  here — it is the one that loses to a single line of text, which belongs beside its share of
+  the ceiling (see <code>pnpm ablate</code>) rather than buried.
+</div>
+
+<div class="callout">
+  <strong>What the structural defences do and do not cover.</strong> Two layers hold
+  absolutely. Output is validated against the taxonomy before anything reads it, and
+  <code>classification.reason_code</code> is a foreign key to the seeded
+  <code>reason_code</code> table — so a code outside the eighteen cannot be stored, let alone
+  acted on. And a cause only ever <em>indexes into</em> the policy: it selects a schedule row,
+  it cannot become one, which is why the attack demanding &ldquo;unlimited retries&rdquo; has
+  nothing to attack — the schedule comes from the policy YAML and no classifier output will
+  change it. Neither layer covers being steered to a label that IS in the taxonomy but wrong,
+  which spends a real fee on the wrong strategy. That is the residual risk, and the table above
+  is its size.
+</div>
+
+<p class="aside"><strong>Measured against the corpus, not against the persisted run, and the
+reason is worth stating.</strong> The first version of this section read the batch — join the
+planted descriptions to their classifications and count the steered ones. It reported zero, and
+that zero was vacuous: <code>pnpm eval</code> classifies with the <em>oracle</em>, which reads
+the simulator's seeded cause and never looks at the description. An attack cannot steer a
+classifier that does not read it, so the number measured nothing while looking exactly like a
+security result. Run <code>pnpm ablate</code> to measure the model path the same way.</p>
 
 <h2>One engine, five kinds of revenue at risk</h2>
 <p>Failed payments, failed subscription cycles, lapsed mandates, abandoned checkouts and
