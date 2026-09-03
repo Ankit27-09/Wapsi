@@ -828,3 +828,7 @@ code {
 
 .call-note { font-size: 11px; color: var(--ink-faint); line-height: 1.4; }
 .call-error { font-size: 11.5px; color: var(--bad); line-height: 1.45; max-width: 56ch; }
+
+/* The name, when it sits inside dimmed prose. Full ink so the word itself does not read as
+   secondary to its own gloss. */
+.brand-inline { color: var(--ink); font-weight: 700; letter-spacing: -0.01em; }

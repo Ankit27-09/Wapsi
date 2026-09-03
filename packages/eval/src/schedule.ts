@@ -49,7 +49,7 @@ const PROMISE_FOLLOWUP_HOURS = 12;
 /**
  * When attempt `attemptNo` would land, measured from the failure.
  *
- * Uses the policy's schedule, which is exact for the Recovery Controller. The baseline arms
+ * Uses the policy's schedule, which is exact for Wapsi. The baseline arms
  * construct their plans directly and are not bounds-checked, so an approximation is
  * harmless for them — they progress on the fallback below.
  */

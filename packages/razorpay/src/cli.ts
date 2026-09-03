@@ -210,7 +210,7 @@ async function main(): Promise<void> {
         description: describe(decision.reasonCode, decision.riskClass),
         customerName: decision.customerName,
         customerContact: testContact(decision.customerRef),
-        customerEmail: 'test@recovery-controller.invalid',
+        customerEmail: 'test@wapsi.invalid',
         notify: false,
         notes: {
           txn_id: decision.txnId,

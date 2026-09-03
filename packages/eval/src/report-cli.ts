@@ -334,7 +334,7 @@ function render(args: RenderArgs): string {
     b2: 'B2 · fixed-schedule dunning',
     b4: 'B4 · blast reminders at everything',
     b3_oracle: 'B3 · oracle (ceiling)',
-    rc: 'RC · Recovery Controller',
+    rc: 'RC · Wapsi',
   };
 
   const armsTable = table(
@@ -453,7 +453,7 @@ function render(args: RenderArgs): string {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Recovery Controller — evidence</title>
+<title>Wapsi — evidence</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -489,8 +489,9 @@ function render(args: RenderArgs): string {
   @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
 </style></head><body><main>
 
-<h1>Recovery Controller</h1>
-<p class="sub">Expected-value gated payment recovery with a bounded, self-improving policy ·
+<h1>Wapsi</h1>
+<p class="sub"><b>वापसी</b> · <i>the return</i> — expected-value gated payment recovery with a
+bounded, self-improving policy ·
 seed ${args.seed} · ${args.count} transactions · policy v${args.policy.version}
 (<code>${escapeXml(args.policy.hash.slice(0, 12))}</code>)</p>
 
@@ -515,7 +516,7 @@ ${armsTable}
     })),
   )}<figcaption>Net value: contribution margin recovered, minus every rupee spent.</figcaption></figure>
 
-<p>The Recovery Controller captures
+<p>Wapsi captures
 <strong>${percentOfPaise(args.rc.valueRecovered, args.ceiling.valueRecovered)}</strong> of what
 perfect play could have achieved. The oracle sees the per-issuer effect no real policy can
 observe, evaluates every timing and every intervention available, and plays optimally against
@@ -764,7 +765,7 @@ ${hostileTable}
 ${calibrationTable}
 
 <h2>The exception list</h2>
-<p class="lede">${refusedTotal} actions the Recovery Controller refused to take, grouped by
+<p class="lede">${refusedTotal} actions Wapsi refused to take, grouped by
 cause and rule, each with the arithmetic that produced it.</p>
 <p>This is the section most submissions leave out. A refusal that cannot say what it would
 have been worth is a log line; one that can is an audit record, and it is why the decision

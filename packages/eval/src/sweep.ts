@@ -83,7 +83,7 @@ export interface SweepArmResult {
 export interface SweepDraw {
   readonly draw: number;
   readonly results: readonly SweepArmResult[];
-  /** True when the Recovery Controller's net value beat every baseline in this world. */
+  /** True when Wapsi's net value beat every baseline in this world. */
   readonly controllerWins: boolean;
   readonly controllerNet: Paise;
   readonly bestBaselineNet: Paise;

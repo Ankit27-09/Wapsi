@@ -8,7 +8,7 @@ import type { Classification, ClassificationInput, Classifier } from './classifi
  * construction. Not a strategy: a MEASUREMENT DEVICE.
  *
  * Its purpose is to separate two things the headline figure otherwise conflates. When the
- * Recovery Controller recovers less than it might have, the shortfall has two possible
+ * Wapsi recovers less than it might have, the shortfall has two possible
  * sources — the policy chose badly, or the classifier mislabelled the cause and the policy
  * then executed the wrong plan correctly. Running the identical policy against perfect
  * labels isolates the second, and the gap between the oracle and the keyword or LLM arms

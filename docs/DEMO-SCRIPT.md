@@ -1,6 +1,12 @@
+> **SUPERSEDED.** This was written before degradation detection existed, so it describes a
+> three-step loop (diagnose → price → decide) where the system now has six, and it does not
+> mention the detector, the ablation's rupee result, the injection measurement or the
+> Hinglish audio. Kept for the build record. The current five-minute script lives outside
+> the repository.
+
 # 5-minute demo script
 
-Recovery Controller · Track 03 — AI Revenue Recovery
+Wapsi · Track 03 — AI Revenue Recovery
 
 **Read this on a second screen while you record.** Narration is word-for-word on the left,
 what the viewer sees on the right. Timings are cumulative.
@@ -46,7 +52,7 @@ whether the retry works or not.**
 **So retry a hundred and recover five, and you may have spent more than you got back. Almost
 no recovery system can tell you which hundred were worth trying."**
 
-> **Screen:** cut to your face or the repo. Title card: *Recovery Controller*.
+> **Screen:** cut to your face or the repo. Title card: *Wapsi*.
 
 ---
 

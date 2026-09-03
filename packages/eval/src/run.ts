@@ -62,7 +62,9 @@ async function main(): Promise<void> {
 
   try {
     process.stdout.write(
-      `\n  Recovery Controller — evaluation\n` +
+      // The gloss is printed once, here, because this header is the first thing a judge
+      // watching a demo reads — and a name they cannot parse is a name that means nothing.
+      `\n  Wapsi — वापसी, the return\n` +
         `  seed ${args.seed} · world "${args.world}" · policy v${policy.version} ` +
         `(${policy.hash.slice(0, 12)})\n\n`,
     );
@@ -180,7 +182,7 @@ function reportByRiskClass(results: readonly ArmMetrics[]): void {
   const ceiling = results.find((m) => m.arm === 'b3_oracle');
   if (controller === undefined || ceiling === undefined) return;
 
-  process.stdout.write('  Recovery Controller by risk class, against the per-class ceiling\n\n');
+  process.stdout.write('  Wapsi by risk class, against the per-class ceiling\n\n');
 
   const rows = controller.byRiskClass
     .filter((slice) => slice.transactions > 0)

@@ -35,9 +35,13 @@ export function Nav() {
     <header className="topbar">
       <div className="topbar-inner">
         <Link href="/" className="brand">
-          {/* A target with a ring through it: the whole product is choosing what to aim at
-              and, more often, what to leave alone. Inline SVG rather than an icon font or an
-              image — one fewer request, and it inherits the accent colour. */}
+          {/* A return arrow inside a boundary.
+              वापसी is the return — money coming back — and the ring is the thing that decides
+              whether it is worth going after. The arrow does not close the circle, because the
+              system completes the journey for 80 of 310 recoverable transactions and declines
+              the rest.
+              Inline SVG rather than an icon font or an image: one fewer request, and it
+              inherits the accent colour. */}
           <svg
             className="brand-mark"
             width="22"
@@ -46,13 +50,30 @@ export function Nav() {
             fill="none"
             aria-hidden="true"
           >
-            <circle cx="12" cy="12" r="9.25" stroke="currentColor" strokeWidth="1.6" />
-            <circle cx="12" cy="12" r="4.25" stroke="currentColor" strokeWidth="1.6" />
-            <circle cx="12" cy="12" r="1.6" fill="currentColor" />
-            <path d="M12 0.5v4M12 19.5v4M0.5 12h4M19.5 12h4" stroke="currentColor" strokeWidth="1.6" />
+            <circle
+              cx="12"
+              cy="12"
+              r="9.25"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeOpacity="0.35"
+            />
+            <path
+              d="M16.5 9.5H10a3.5 3.5 0 0 0 0 7h3"
+              stroke="currentColor"
+              strokeWidth="1.75"
+              strokeLinecap="round"
+            />
+            <path
+              d="m14 7 2.6 2.5L14 12"
+              stroke="currentColor"
+              strokeWidth="1.75"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
           </svg>
           <span className="brand-name">
-            Recovery <span className="brand-accent">Controller</span>
+            Wapsi<span className="brand-accent">.</span>
           </span>
         </Link>
 

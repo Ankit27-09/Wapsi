@@ -171,9 +171,15 @@ export default async function Home({
       {/* ---------- hero ---------- */}
       <section className="band band-hero">
         <div className="band-inner hero">
+        {/* The name is glossed here and nowhere else on this page. वापसी means the return —
+            money coming back — and a judge who does not read Hindi should meet the meaning in
+            the same breath as the word, once, without it becoming a motif. */}
         <div className="hero-badge">
           <span className="pill accent">Track 03</span>
-          <span className="dim">AI Revenue Recovery · Razorpay AI Buildathon 2026</span>
+          <span className="dim">
+            <strong className="brand-inline">Wapsi</strong> · वापसी, the return · Razorpay AI
+            Buildathon 2026
+          </span>
         </div>
 
         <h1 className="hero-title">

@@ -62,7 +62,7 @@ export interface ArmMetrics {
   /**
    * Attempts fired whose expected value, priced against the PUBLISHED priors, was negative.
    *
-   * Zero for the Recovery Controller by construction — the gate refuses them. For a
+   * Zero for Wapsi by construction — the gate refuses them. For a
    * baseline it is the size of the waste, measured against the policy's own beliefs rather
    * than against hindsight, which is what makes it a fair criticism instead of a gotcha.
    */

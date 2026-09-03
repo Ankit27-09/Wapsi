@@ -1,4 +1,4 @@
-# Recovery Controller — Implementation Plan
+# Wapsi — Implementation Plan
 
 > Track 03 · Razorpay AI Buildathon 2026
 > Companion to `Recovery-Controller-Track03-Build-Brief-v2.docx` (the *what* and *why*).

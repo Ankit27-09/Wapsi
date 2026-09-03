@@ -28,7 +28,7 @@ const request = {
   description: 'Complete your incomplete order — abandoned at otp [test mode]',
   customerName: 'Synthetic Customer 12',
   customerContact: '+919900000001',
-  customerEmail: 'test@recovery-controller.invalid',
+  customerEmail: 'test@wapsi.invalid',
 };
 
 /** A well-formed Razorpay reply, as JSON text. */

@@ -32,9 +32,9 @@ const mono = JetBrains_Mono({
 });
 
 export const metadata = {
-  title: 'Recovery Controller',
+  title: 'Wapsi — the return',
   description:
-    'Expected-value gated revenue recovery across five risk classes — Razorpay AI ' +
+    'वापसी — expected-value gated revenue recovery across five risk classes. Razorpay AI ' +
     'Buildathon 2026, Track 03',
 };
 

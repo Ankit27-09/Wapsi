@@ -1,6 +1,7 @@
-# Recovery Controller
+# Wapsi
 
-**Expected-value gated revenue recovery with a bounded, self-improving policy.**
+**वापसी** · *the return* — expected-value gated revenue recovery with a bounded,
+self-improving policy.
 Razorpay AI Buildathon 2026 · Track 03 — AI Revenue Recovery
 
 One decision engine across five kinds of revenue at risk: failed payments, failed
@@ -23,7 +24,7 @@ all**, because most recovery attempts destroy value and the system can prove whi
 | **B2** · fixed-schedule dunning | 57/310 | 18.4% | ₹1,04,525.99 | ₹1,199.40 | ₹1,03,326.59 | 21.1% |
 | **B4** · blast reminders at everything | 8/310 | 2.6% | ₹96,028.12 | ₹120.12 | ₹95,908.00 | 19.4% |
 | **B3** · oracle (ceiling) | 129/310 | 41.6% | ₹4,94,721.65 | ₹666.04 | ₹4,94,055.61 | **100.0%** |
-| **RC** · Recovery Controller | **80/310** | **25.8%** | **₹3,03,937.16** | **₹375.42** | **₹3,03,561.74** | **61.4%** |
+| **RC** · Wapsi | **80/310** | **25.8%** | **₹3,03,937.16** | **₹375.42** | **₹3,03,561.74** | **61.4%** |
 
 **Negative expected-value attempts**, priced against the *published* priors — the evidence
 available beforehand, not hindsight:

@@ -136,7 +136,7 @@ const ARM_LABELS: Readonly<Record<string, string>> = {
   b1: 'Retry all, immediately',
   b2: 'Fixed-schedule dunning',
   b3_oracle: 'Oracle (ceiling)',
-  rc: 'Recovery Controller',
+  rc: 'Wapsi',
 };
 
 export async function loadArms(seed: number): Promise<readonly ArmRow[]> {

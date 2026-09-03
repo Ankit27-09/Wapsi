@@ -1,6 +1,6 @@
 # Architecture
 
-**Recovery Controller** — expected-value gated revenue recovery.
+**Wapsi** (वापसी · *the return*) — expected-value gated revenue recovery.
 Razorpay AI Buildathon 2026 · Track 03
 
 Every diagram below renders natively on GitHub. Every package name, table name, enum value and
@@ -538,7 +538,7 @@ flowchart LR
     POP --> B2["<b>B2</b> fixed-schedule dunning<br/><i>same budget, no diagnosis</i>"]
     POP --> B4["<b>B4</b> blast reminders<br/><i>untargeted messaging</i>"]
     POP --> B3["<b>B3</b> oracle<br/><i>reads ground truth</i>"]
-    POP --> RC["<b>RC</b> Recovery Controller"]
+    POP --> RC["<b>RC</b> Wapsi"]
 
     B0 & B1 & B2 & B4 & RC --> CMP["net value compared"]
     B3 --> CEIL["the CEILING"]

@@ -64,7 +64,7 @@ export default async function Overview({
         <div className="tile primary">
           <div className="label">Net value</div>
           <div className="value">{formatINR(rc?.net ?? ZERO)}</div>
-          <div className="note">Recovery Controller</div>
+          <div className="note">Wapsi</div>
         </div>
         <div className="tile">
           <div className="label">Of achievable</div>

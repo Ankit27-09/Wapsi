@@ -69,7 +69,7 @@ export interface Arm {
  * exactly true of an immediate re-present of a `do_not_honour` decline — nobody does that,
  * so nobody has measured it.
  *
- * The Recovery Controller uses `priors.prior` directly, where a missing entry is a
+ * Wapsi uses `priors.prior` directly, where a missing entry is a
  * configuration bug and throws. The difference is deliberate: the policy is only allowed
  * to act on situations it has evidence about; a baseline acts regardless, and pricing its
  * actions at zero is how the report quantifies the waste.
@@ -100,7 +100,7 @@ function canCharge(riskClass: RiskClass): boolean {
 }
 
 /**
- * Price an action the way the Recovery Controller would have, without gating on it.
+ * Price an action the way Wapsi would have, without gating on it.
  *
  * This is what lets the report say "retry-everything fired N attempts whose expected value
  * was negative, costing ₹X" — the baseline's waste measured against the policy's own
@@ -151,7 +151,7 @@ function priceAction(
 /** The submission. Full planner: EV gate, bounds, schedule, consent. */
 export const RECOVERY_CONTROLLER: Arm = {
   id: 'rc',
-  label: 'Recovery Controller',
+  label: 'Wapsi',
   description:
     'Diagnoses root cause, gates every action on expected value, respects the policy ' +
     'envelope, stops when stopping rules fire, escalates what it cannot resolve.',
@@ -193,7 +193,7 @@ export const RETRY_ALL_IMMEDIATELY: Arm = {
  *
  * THE ARM THAT MATTERS MOST FOR THE HEADLINE CLAIM.
  *
- * B1 takes one attempt while the Recovery Controller takes up to three, so part of the
+ * B1 takes one attempt while Wapsi takes up to three, so part of the
  * controller's advantage over B1 is simply volume rather than judgement. B2 removes that
  * confound: same attempt budget, same fee exposure, no targeting. Whatever separates the
  * controller from B2 is the value of DIAGNOSING the failure rather than merely persisting.

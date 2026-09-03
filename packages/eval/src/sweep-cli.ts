@@ -17,7 +17,7 @@ import { runSweep, simulateArm } from './sweep.js';
  *
  * Two questions, and the second is the more useful one.
  *
- *   ROBUSTNESS: in what share of five hundred perturbed worlds does the Recovery Controller
+ *   ROBUSTNESS: in what share of five hundred perturbed worlds does Wapsi
  *   still produce more net value than the best baseline?
  *
  *   THRESHOLD: at what value of the single most load-bearing assumption does that stop
