@@ -114,6 +114,15 @@ export interface ArmRow {
   readonly grossAtRisk: Paise;
   /** Contribution margin on all of it: the most any policy could net, if nothing were lost. */
   readonly marginAtRisk: Paise;
+  /**
+   * Gross rupees actually collected — the payments that went through.
+   *
+   * THE MISSING MIDDLE TERM. Showing "₹97,11,073.95 at risk" beside "₹3,03,561.74 recovered"
+   * reads as though 94 lakh was lost, and it was read that way the first time anyone saw it.
+   * The gap is two things at once: most of that money is unrecoverable by ANYONE, and the
+   * recovered figure is contribution margin rather than cash. This is the step between them.
+   */
+  readonly cashCollected: Paise;
   readonly rateBps: number;
   readonly valueRecovered: Paise;
   readonly cost: Paise;
@@ -182,6 +191,7 @@ export async function loadArms(seed: number): Promise<readonly ArmRow[]> {
       .execute();
 
     let value = ZERO;
+    let cashCollected = ZERO;
     let fees = ZERO;
     let negativeEv = 0;
     const recoveredTxns = new Set<string>();
@@ -192,7 +202,9 @@ export async function loadArms(seed: number): Promise<readonly ArmRow[]> {
       if (!row.success) continue;
 
       const margin = marginByTxn.get(row.txn_id) ?? 0;
-      value = add(value, mulBps(PaiseSchema.parse(row.recovered_paise), bps(margin)));
+      const recovered = PaiseSchema.parse(row.recovered_paise);
+      cashCollected = add(cashCollected, recovered);
+      value = add(value, mulBps(recovered, bps(margin)));
       recoveredTxns.add(row.txn_id);
     }
 
@@ -217,6 +229,7 @@ export async function loadArms(seed: number): Promise<readonly ArmRow[]> {
       transactions: txns.length,
       grossAtRisk,
       marginAtRisk,
+      cashCollected,
       rateBps: recoverable === 0 ? 0 : Math.round((recoveredTxns.size / recoverable) * 10_000),
       valueRecovered: value,
       cost,

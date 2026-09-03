@@ -156,8 +156,6 @@ export default async function Home({
     ? `${(Number((rc.valueRecovered * 10_000n) / ceiling.valueRecovered) / 100).toFixed(1)}%`
     : '—';
 
-  const classesExercised = byClass.filter((c) => c.transactions > 0).length;
-
   return (
     /*
      * `home` is what widens this route.
@@ -219,12 +217,33 @@ export default async function Home({
               <div className="value">{formatINR(rc.grossAtRisk)}</div>
               <div className="note">{rc.transactions} failed payments, gross</div>
             </div>
+            {/*
+             * THE MIDDLE TERM, and leaving it out was a real communication bug.
+             *
+             * "₹97,11,073.95 at risk" next to "₹3,03,561.74 recovered" reads as though 94
+             * lakh was lost, and that is exactly how the first person to see it read it. The
+             * gap is two different things at once, and neither is failure:
+             *
+             *   - Most of that money cannot be recovered by ANYONE. Perfect play with full
+             *     knowledge of the future collects ₹52,11,112.56 and leaves ₹44,99,961.39 on
+             *     the table, because an expired card, a revoked mandate and a customer who
+             *     never opted in are not recoverable at any price.
+             *   - The headline is contribution MARGIN, not cash. ₹31,13,760.33 of payments
+             *     actually went through; the business keeps the margin on that, minus spend.
+             *
+             * So the row now steps through it rather than inviting the subtraction.
+             */}
+            <div className="hero-stat">
+              <div className="label">Cash collected</div>
+              <div className="value">{formatINR(rc.cashCollected)}</div>
+              <div className="note">
+                payments that went through · {rc.recovered} of {rc.recoverable} recoverable
+              </div>
+            </div>
             <div className="hero-stat primary">
               <div className="label">Net value recovered</div>
               <div className="value">{formatINR(rc.net)}</div>
-              <div className="note">
-                margin on {rc.recovered} of {rc.recoverable} recoverable
-              </div>
+              <div className="note">contribution margin on it, minus every rupee spent</div>
             </div>
             <div className="hero-stat">
               <div className="label">Of the achievable ceiling</div>
@@ -236,11 +255,10 @@ export default async function Home({
               <div className="value good">{rc.negativeEvAttempts}</div>
               <div className="note">of {rc.attemptsFired} fired · refused by construction</div>
             </div>
-            <div className="hero-stat">
-              <div className="label">Risk classes live</div>
-              <div className="value">{classesExercised}</div>
-              <div className="note">one engine, not five systems</div>
-            </div>
+            {/* `Risk classes live` used to sit here. Dropped rather than squeezed into a
+                sixth column: the five leak cards further down already carry each class with
+                its live transaction count, so the tile restated something the page shows
+                better — and a currency figure needs the width more than a single digit. */}
           </div>
         ) : (
           <div className="callout warn">
