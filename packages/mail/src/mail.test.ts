@@ -188,6 +188,33 @@ describe('the free tier has one predictable failure', () => {
   });
 });
 
+describe('the console reads the repository’s .env', () => {
+  it('next.config.mjs loads the workspace root env file', () => {
+    // A DOCUMENTATION LOCK on a divergence with no visible symptom.
+    //
+    // Next auto-loads `.env` from its own project root — `apps/web` — and nowhere else, while
+    // every other entry point here is a Node command run from the workspace root with
+    // `--env-file-if-exists=.env`. Without the loader in the config, the two halves of the
+    // product disagree about what is configured: `pnpm razorpay --live` issues a link with
+    // the key in `.env`, and the console beside it reports that no key is set.
+    //
+    // That is not hypothetical. The dispatch button printed `RESEND_API_KEY is not set` with
+    // the key sitting in `.env`, and the same silence would have blocked the Razorpay lookup,
+    // so every dispatched mail would have carried no link and a warning that read like a
+    // Razorpay outage. Nothing crashed. Nothing logged. It just quietly said "not configured".
+    //
+    // If this test fails, the console has stopped seeing the keys the CLIs see.
+    const config = readFileSync(
+      join(import.meta.dirname, '..', '..', '..', 'apps/web/next.config.mjs'),
+      'utf8',
+    );
+
+    expect(config).toMatch(/loadEnvFile/);
+    // Loaded from the workspace root, two levels up — not from `apps/web`.
+    expect(config).toMatch(/'\.\.',\s*'\.\.'/);
+  });
+});
+
 describe('the console cannot create a payment link', () => {
   it('dispatch.ts looks a link up and never issues one', () => {
     // A DOCUMENTATION LOCK on a boundary no type can express.
