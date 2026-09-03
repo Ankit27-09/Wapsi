@@ -114,7 +114,7 @@ export const DEFAULT_VOICE_MODELS: Readonly<Record<VoiceProviderId, string>> = {
   // Queried from the live model list rather than remembered. Two others are available
   // (gemini-2.5-flash-preview-tts, gemini-2.5-pro-preview-tts); this is the current lite tier.
   gemini: 'gemini-3.1-flash-tts-preview',
-  sarvam: 'bulbul:v2',
+  sarvam: 'bulbul:v3',
 };
 
 /**
@@ -338,7 +338,26 @@ export function resolveVoiceProvider(env: NodeJS.ProcessEnv = process.env): Voic
   const named = env['VOICE_PROVIDER']?.trim();
   const sarvamKey = env['SARVAM_API_KEY'];
   const geminiKey = env['GEMINI_API_KEY'];
-  const model = env['VOICE_MODEL']?.trim();
+
+  /*
+   * AN EMPTY `VOICE_MODEL` IS ABSENT, NOT A MODEL NAMED "".
+   *
+   * This read `env['VOICE_MODEL']?.trim()` and spread it in whenever it was not `undefined`.
+   * `.env.example` ships `VOICE_MODEL=` with nothing after it, so a copied file — or the one
+   * a key was just added to — passed `model: ''` and OVERRODE the default. The CLI printed
+   * `sarvam:` with an empty model and the request would have gone out asking for a model
+   * that does not exist.
+   *
+   * Caught by reading the dry-run output after setting a key, which is the only place it was
+   * visible: the failure is a request the provider rejects, not a type error. The sibling
+   * resolver in `@rc/ai` already collapsed empty to the default; this one did not, and two
+   * files by the same hand disagreeing about the same env convention is exactly how that
+   * happens.
+   */
+  const named_model = env['VOICE_MODEL']?.trim() ?? '';
+  const pick = (id: VoiceProviderId): { model: string } => ({
+    model: named_model === '' ? DEFAULT_VOICE_MODELS[id] : named_model,
+  });
 
   if (named !== undefined && named !== '') {
     if (!(VOICE_PROVIDER_IDS as readonly string[]).includes(named)) {
@@ -349,19 +368,19 @@ export function resolveVoiceProvider(env: NodeJS.ProcessEnv = process.env): Voic
     }
     if (named === 'sarvam') {
       return usable(sarvamKey)
-        ? { provider: createSarvamVoice({ apiKey: sarvamKey, ...(model === undefined ? {} : { model }) }), problem: null }
+        ? { provider: createSarvamVoice({ apiKey: sarvamKey, ...pick('sarvam') }), problem: null }
         : { provider: null, problem: 'VOICE_PROVIDER=sarvam but SARVAM_API_KEY is not set' };
     }
     return usable(geminiKey)
-      ? { provider: createGeminiVoice({ apiKey: geminiKey, ...(model === undefined ? {} : { model }) }), problem: null }
+      ? { provider: createGeminiVoice({ apiKey: geminiKey, ...pick('gemini') }), problem: null }
       : { provider: null, problem: 'VOICE_PROVIDER=gemini but GEMINI_API_KEY is not set' };
   }
 
   if (usable(sarvamKey)) {
-    return { provider: createSarvamVoice({ apiKey: sarvamKey, ...(model === undefined ? {} : { model }) }), problem: null };
+    return { provider: createSarvamVoice({ apiKey: sarvamKey, ...pick('sarvam') }), problem: null };
   }
   if (usable(geminiKey)) {
-    return { provider: createGeminiVoice({ apiKey: geminiKey, ...(model === undefined ? {} : { model }) }), problem: null };
+    return { provider: createGeminiVoice({ apiKey: geminiKey, ...pick('gemini') }), problem: null };
   }
 
   return {

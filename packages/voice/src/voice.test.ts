@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  DEFAULT_VOICE_MODELS,
   ScriptError,
   VoiceError,
   createGeminiVoice,
@@ -325,5 +326,47 @@ describe('provider selection', () => {
       env({ VOICE_PROVIDER: 'elevenlabs', GEMINI_API_KEY: 'b' }),
     );
     expect(problem).toMatch(/expected one of/);
+  });
+});
+
+describe('an empty env var is absent, not a value', () => {
+  const env = (vars: Record<string, string>): NodeJS.ProcessEnv => vars;
+
+  it('does not let VOICE_MODEL="" override the default', () => {
+    // THE BUG THIS PINS. `.env.example` ships `VOICE_MODEL=` with nothing after it, and the
+    // resolver spread the value in whenever it was not `undefined` — so a copied file passed
+    // `model: ''` and the CLI printed `sarvam:` with no model. The request would then have
+    // asked a provider for a model that does not exist, which is a rejected call rather than
+    // a type error, so nothing upstream would have caught it.
+    const { provider } = resolveVoiceProvider(
+      env({ SARVAM_API_KEY: 'k', VOICE_MODEL: '' }),
+    );
+    expect(provider?.model).toBe(DEFAULT_VOICE_MODELS.sarvam);
+  });
+
+  it('does not let VOICE_PROVIDER="" defeat the preference order', () => {
+    // Same class of mistake on the sibling variable: an empty provider name must fall
+    // through to "whichever key is present" rather than fail an unknown-name check.
+    const { provider, problem } = resolveVoiceProvider(
+      env({ VOICE_PROVIDER: '', SARVAM_API_KEY: 'k', GEMINI_API_KEY: 'k' }),
+    );
+    expect(problem).toBeNull();
+    expect(provider?.id).toBe('sarvam');
+  });
+
+  it('still honours a real VOICE_MODEL', () => {
+    const { provider } = resolveVoiceProvider(
+      env({ SARVAM_API_KEY: 'k', VOICE_MODEL: 'bulbul:v1' }),
+    );
+    expect(provider?.model).toBe('bulbul:v1');
+  });
+
+  it('applies the default per provider, not one shared string', () => {
+    expect(resolveVoiceProvider(env({ SARVAM_API_KEY: 'k' })).provider?.model).toBe(
+      DEFAULT_VOICE_MODELS.sarvam,
+    );
+    expect(resolveVoiceProvider(env({ GEMINI_API_KEY: 'k' })).provider?.model).toBe(
+      DEFAULT_VOICE_MODELS.gemini,
+    );
   });
 });

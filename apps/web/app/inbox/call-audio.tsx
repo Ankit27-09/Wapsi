@@ -55,8 +55,12 @@ export function CallAudio({ sendId, seconds }: { sendId: number; seconds: number
       </button>
 
       {pending ? (
+        // Measured, not guessed, and it changed once Sarvam was configured: Gemini took
+        // 17.5s for this script and Sarvam 2.7s for the same 292 characters. The copy said
+        // "15–20s" while the configured provider was six times faster, which is the kind of
+        // pessimism that reads as a broken estimate rather than a cautious one.
         <span className="call-note">
-          calling the speech provider — 15–20s on a free tier, then cached
+          calling the speech provider — a few seconds, then cached
         </span>
       ) : null}
 
