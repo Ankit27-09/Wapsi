@@ -555,16 +555,21 @@ code {
    Three steps between the hero and the detail. It exists because the hero states a claim and
    the sections below prove it, and a reader needs the shape of the mechanism in between. */
 
-/* Six steps and five connectors, in two rows of three at the shell width.
-   An explicit 11-column track (three steps, two arrows, wrapping) rather than the old
-   1fr auto 1fr auto 1fr: at six steps a single row gives each 190px, which is narrower than
-   the text inside it needs, and `auto-fit` cannot express "steps stretch, arrows do not". */
+/* Five tracks, wrapping to two rows of three steps.
+   `1fr auto 1fr auto 1fr` — steps stretch, connectors take 34px — so ONE ROW HOLDS EXACTLY
+   THREE STEPS AND TWO CONNECTORS, and the child count has to be a multiple of five or the
+   second row goes out of phase and every step lands in a 34px connector track. Six steps
+   with a connector between each pair is eleven children, which is what broke it; the markup
+   omits the one between 03 and 04 and the row wrap does that transition instead.
+   Six across a single row was the alternative and is worse: 190px a step at the shell width,
+   narrower than the prose inside them. */
 .flow { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; align-items: stretch;
         gap: 0; border: 1px solid var(--border); border-radius: 13px; overflow: hidden;
         background: var(--surface); }
 
-/* The connector at the end of a row points down into the next one. */
-.flow > .flow-arrow:nth-of-type(3) { transform: rotate(90deg); }
+/* A rule under the first row, so the wrap reads as a deliberate break rather than as a
+   panel that ran out of width. */
+.flow > :nth-child(-n + 5) { border-bottom: 1px solid var(--border); }
 
 /* The first and last steps are the two the brief names and most submissions skip:
    detection at the front, and a stopping rule at the back. */
@@ -588,8 +593,8 @@ code {
               color: var(--border-lit); background: var(--bg); }
 .flow-arrow svg { display: block; }
 
-/* The third step is the one that matters, so it carries the accent — most of the time the
-   answer is no, and this is where that happens. */
+/* DECIDE is the step that matters, so it carries the accent — most of the time the answer is
+   no, and this is where that happens. */
 .flow-step.decisive { background: linear-gradient(160deg, var(--accent-wash), var(--surface) 70%); }
 .flow-step.decisive h4 { color: var(--accent-lit); }
 
@@ -742,6 +747,11 @@ code {
   /* Both three-across bands stack, and the connectors between them turn a quarter turn. */
   .flow { grid-template-columns: 1fr; }
   .flow-arrow { width: auto; height: 30px; transform: rotate(90deg); }
+  /* Single column, so the first five children are no longer a row — the rule under them
+     would land under DETECT..PRICE arbitrarily. Every step gets one instead, which is what
+     separates them once they are stacked. */
+  .flow > :nth-child(-n + 5) { border-bottom: none; }
+  .flow > .flow-step:not(:last-child) { border-bottom: 1px solid var(--border); }
 
   /* The wall stacks, so its vertical barrier becomes a horizontal one. */
   .wall { grid-template-columns: 1fr; }

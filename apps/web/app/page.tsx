@@ -314,9 +314,12 @@ export default async function Home({
           </p>
         </div>
 
-        <div className="flow-arrow">
-          <Chevron />
-        </div>
+        {/* No connector between 03 and 04. The grid is five tracks wide — step, connector,
+            step, connector, step — so six steps and five connectors do not divide into it:
+            the eleventh child pushes row two out of phase, landing every step in a connector
+            track 34px wide. Dropping this one leaves ten children, exactly two rows, and the
+            wrap itself is the transition. It also falls in the right place: observe and price
+            above, decide and act below. */}
 
         <div className="flow-step decisive">
           <div className="flow-num">04 · DECIDE</div>
