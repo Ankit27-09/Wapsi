@@ -48,7 +48,24 @@ export const dynamic = 'force-dynamic';
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en" className={`${display.variable} ${mono.variable}`}>
-      <body>
+      {/*
+       * `suppressHydrationWarning` here is about BROWSER EXTENSIONS, not about anything this
+       * app renders.
+       *
+       * Extensions write their own attributes onto `<body>` before React hydrates — ColorZilla
+       * adds `cz-shortcut-listen="true"`, and password managers, Grammarly and dark-mode
+       * injectors all do the equivalent. React then compares the server's HTML against a DOM
+       * that a third party has already edited, finds an attribute it did not emit, and logs a
+       * hydration error against our markup for something we did not do.
+       *
+       * Scoped deliberately to this one element. The flag suppresses mismatches on the element
+       * it is set on and its text children, and does NOT extend down the tree, so a genuine
+       * hydration bug anywhere inside `<main>` still reports normally. Putting it on `<html>`
+       * or on a wrapper around `children` would silence real defects, which is the failure
+       * mode worth avoiding here — an operations console that renders different numbers on the
+       * server and the client must say so loudly.
+       */}
+      <body suppressHydrationWarning>
         <Nav />
         <main className="content">{children}</main>
       </body>

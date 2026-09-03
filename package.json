@@ -15,7 +15,7 @@
     "typecheck": "tsc --build --force",
     "lint": "eslint . --max-warnings 0",
     "lint:boundaries": "depcruise packages apps --config .dependency-cruiser.cjs",
-    "test": "vitest run",
+    "test": "vitest run --reporter=default --reporter=json --outputFile.json=artifacts/tests.json",
     "test:watch": "vitest",
     "db:up": "docker compose up -d postgres redis",
     "db:migrate": "pnpm build && node --env-file-if-exists=.env packages/db/dist/migrate.js up",

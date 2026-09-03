@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { formatINR } from '@rc/core';
+import { loadProjectFacts } from '../lib/facts';
 import { loadArms, loadByRiskClass, seedFrom } from '../lib/queries';
 import { SeedPicker } from './seed-picker';
 
@@ -130,25 +131,48 @@ export default async function Home({
   const seed = seedFrom((await searchParams).seed);
   const arms = await loadArms(seed);
   const byClass = await loadByRiskClass(seed);
+  const facts = await loadProjectFacts();
 
   const rc = arms.find((a) => a.arm === 'rc');
   const ceiling = arms.find((a) => a.arm === 'b3_oracle');
   const dunning = arms.find((a) => a.arm === 'b2');
 
-  const hasRun = rc !== undefined && ceiling !== undefined;
+  /*
+   * A run has to be POPULATED, not merely present.
+   *
+   * The first version asked only whether the `rc` and oracle rows existed, and that turned
+   * out to be satisfiable by leftovers: `pnpm ablate` seeds its own worlds under arm `rc`, so
+   * after a `db:reset` followed by an ablation the page found both arms, computed a share of a
+   * zero ceiling, and rendered ₹0.00 and "—" as though the engine had recovered nothing.
+   *
+   * That is the worst failure available to this page. An empty state says "run pnpm demo" and
+   * costs a reader nothing; a confident ₹0.00 says the system does not work. So the ceiling
+   * has to have found value to be a ceiling at all.
+   */
+  const hasRun = rc !== undefined && ceiling !== undefined && ceiling.valueRecovered > 0n;
 
   /** Share of the ceiling, on value recovered. Blank when no run exists to read. */
-  const shareOfCeiling =
-    hasRun && ceiling.valueRecovered > 0n
-      ? `${(Number((rc.valueRecovered * 10_000n) / ceiling.valueRecovered) / 100).toFixed(1)}%`
-      : '—';
+  const shareOfCeiling = hasRun
+    ? `${(Number((rc.valueRecovered * 10_000n) / ceiling.valueRecovered) / 100).toFixed(1)}%`
+    : '—';
 
   const classesExercised = byClass.filter((c) => c.transactions > 0).length;
 
   return (
-    <>
+    /*
+     * `home` is what widens this route.
+     *
+     * Every other page here is a dashboard whose tables want a bounded measure, so the shared
+     * `.content` wrapper caps them at the shell width. This one is a document being read by
+     * someone deciding whether to keep reading, and a boxed column with 300px of dead gutter
+     * either side of it on a large display reads as an unfinished template. So the wrapper
+     * releases its constraint for this route only, and each band below spans the viewport
+     * while re-constraining its own text — full-bleed backgrounds, measured line lengths.
+     */
+    <div className="home">
       {/* ---------- hero ---------- */}
-      <section className="hero">
+      <section className="band band-hero">
+        <div className="band-inner hero">
         <div className="hero-badge">
           <span className="pill accent">Track 03</span>
           <span className="dim">AI Revenue Recovery · Razorpay AI Buildathon 2026</span>
@@ -226,17 +250,20 @@ export default async function Home({
             lose money. This system fired <strong>{rc.negativeEvAttempts}</strong>.
           </p>
         ) : null}
+        </div>
       </section>
-
-      {/* The picker sits here rather than above the hero, because the paragraph directly
-          above it makes exactly this promise — that a different seed moves every figure. A
-          control beats a sentence saying the same thing. */}
-      <SeedPicker current={seed} path="/" />
 
       {/* ---------- how it works ----------
           The hero makes a claim and the sections below prove it. This is the shape of the
           mechanism in between, in three steps, so a reader knows what they are about to
           look at. */}
+      <section className="band">
+        <div className="band-inner">
+        {/* The picker sits here rather than above the hero, because the hero's closing
+            paragraph makes exactly this promise — that a different seed moves every figure. A
+            control beats a sentence saying the same thing. */}
+        <SeedPicker current={seed} path="/" />
+
       <h3>How one stuck rupee is handled</h3>
       <div className="flow">
         <div className="flow-step">
@@ -279,8 +306,12 @@ export default async function Home({
           </p>
         </div>
       </div>
+        </div>
+      </section>
 
       {/* ---------- the problem ---------- */}
+      <section className="band band-alt">
+        <div className="band-inner">
       <h3>Five ways a merchant leaks revenue</h3>
       <p className="section-note">
         They look like five different problems and they are the same shape of problem: an amount
@@ -305,8 +336,12 @@ export default async function Home({
           );
         })}
       </div>
+        </div>
+      </section>
 
       {/* ---------- the core idea ---------- */}
+      <section className="band">
+        <div className="band-inner">
       <h3>The one idea everything hangs off</h3>
       <p className="section-note">
         Before any action fires — a retry, a payment link, a call — it has to clear this. It is
@@ -341,8 +376,12 @@ export default async function Home({
           </div>
         </div>
       </div>
+        </div>
+      </section>
 
       {/* ---------- the seven directions ---------- */}
+      <section className="band band-alt">
+        <div className="band-inner">
       <h3>What is built</h3>
       <p className="section-note">
         The brief names seven example directions. All seven are here — the table below says what
@@ -361,8 +400,12 @@ export default async function Home({
           </article>
         ))}
       </div>
+        </div>
+      </section>
 
       {/* ---------- why believe it ---------- */}
+      <section className="band">
+        <div className="band-inner">
       <h3>Why any of these numbers mean anything</h3>
 
       <div className="wall">
@@ -402,25 +445,54 @@ export default async function Home({
         nobody has tried to break is not a boundary.
       </div>
 
-      <div className="closing">
-        <div className="closing-item">
-          <div className="closing-value">101</div>
-          <div className="closing-label">tests, including property tests that generate their own counterexamples</div>
         </div>
-        <div className="closing-item">
-          <div className="closing-value">19</div>
-          <div className="closing-label">
-            bugs recorded in <code className="mono">FAILURES.md</code> — five of which had
-            inflated these very numbers
+      </section>
+
+      {/* ---------- closing ----------
+          Read from disk per request, for the same reason the hero figures are read from
+          Postgres. The first version typed these in and the test count was stale within a
+          week — claiming 101 when the suite had reached 172. A tile whose source is missing
+          is omitted rather than guessed. */}
+      <section className="band band-closing">
+        <div className="band-inner">
+          <div className="closing">
+            {facts.tests === null ? null : (
+              <div className="closing-item">
+                <div className="closing-value">{facts.tests}</div>
+                <div className="closing-label">
+                  tests{facts.testsAllPassed ? ' passing' : ''}, including property tests that
+                  generate their own counterexamples
+                </div>
+              </div>
+            )}
+            {facts.bugs === null ? null : (
+              <div className="closing-item">
+                <div className="closing-value">{facts.bugs}</div>
+                <div className="closing-label">
+                  bugs recorded in <code className="mono">FAILURES.md</code> — five of which
+                  had inflated these very numbers
+                </div>
+              </div>
+            )}
+            <div className="closing-item">
+              <div className="closing-value">500</div>
+              <div className="closing-label">
+                perturbed worlds the conclusion is re-tested in, and survives in all of them
+              </div>
+            </div>
+          </div>
+
+          <div className="closing-cta">
+            <Link href="/overview" className="btn primary">
+              See the evidence →
+            </Link>
+            <span className="dim">
+              or read the refusals first — <Link href="/exceptions">every one has its
+              arithmetic beside it</Link>
+            </span>
           </div>
         </div>
-        <div className="closing-item">
-          <div className="closing-value">500</div>
-          <div className="closing-label">
-            perturbed worlds the conclusion is re-tested in, and survives in all of them
-          </div>
-        </div>
-      </div>
-    </>
+      </section>
+    </div>
   );
 }
