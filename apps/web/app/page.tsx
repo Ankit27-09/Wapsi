@@ -202,7 +202,23 @@ export default async function Home({
             <div className="hero-stat primary">
               <div className="label">Net value recovered</div>
               <div className="value">{formatINR(rc.net)}</div>
-              <div className="note">on {rc.recoverable} recoverable of 300</div>
+              {/*
+               * THE DENOMINATOR, because the numerator alone is unreadable.
+               *
+               * This said "on {recoverable} recoverable of 300" — a hardcoded 300 against a
+               * population that had grown to 328, so it printed "310 recoverable of 300".
+               * Impossible on its face, and it was spotted immediately, which is the right
+               * outcome for a number nobody could check.
+               *
+               * Now both figures come from the batch. The gross is what a merchant thinks in;
+               * the net above is contribution margin, because recovering a rupee of revenue
+               * is worth its margin rather than a rupee. Showing one without the other is how
+               * a reader silently compares two different quantities.
+               */}
+              <div className="note">
+                margin on {rc.recovered} of {rc.recoverable} recoverable ·{' '}
+                {rc.transactions} transactions carrying {formatINR(rc.grossAtRisk)}
+              </div>
             </div>
             <div className="hero-stat">
               <div className="label">Of the achievable ceiling</div>

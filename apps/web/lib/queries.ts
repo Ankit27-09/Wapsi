@@ -95,6 +95,25 @@ export interface ArmRow {
   readonly label: string;
   readonly recovered: number;
   readonly recoverable: number;
+  /**
+   * Transactions in the batch.
+   *
+   * Added because the landing page was printing "on 310 recoverable of 300" — a hardcoded
+   * 300 against a population that had grown to 328, which reads as impossible and is worse
+   * than no denominator at all.
+   */
+  readonly transactions: number;
+  /**
+   * Gross rupees at risk across the batch: the sum of every failed amount.
+   *
+   * The number a merchant thinks in. Not what any system could earn, because recovering a
+   * rupee of revenue is worth its contribution margin rather than a rupee — which is the
+   * whole reason the expected-value gate multiplies by margin. Both are carried so a reader
+   * can see the difference instead of guessing which one a headline means.
+   */
+  readonly grossAtRisk: Paise;
+  /** Contribution margin on all of it: the most any policy could net, if nothing were lost. */
+  readonly marginAtRisk: Paise;
   readonly rateBps: number;
   readonly valueRecovered: Paise;
   readonly cost: Paise;
@@ -125,12 +144,29 @@ export async function loadArms(seed: number): Promise<readonly ArmRow[]> {
     const txns = await db()
       .selectFrom('txn')
       .innerJoin('failure_event', 'failure_event.txn_id', 'txn.id')
-      .select(['txn.id as id', 'txn.margin_bps as margin_bps', 'failure_event.raw as raw'])
+      .select([
+        'txn.id as id',
+        'txn.margin_bps as margin_bps',
+        'txn.amount_paise as amount_paise',
+        'failure_event.raw as raw',
+      ])
       .where('txn.batch_id', '=', batch.id)
       .execute();
 
     const marginByTxn = new Map(txns.map((t) => [t.id, t.margin_bps]));
     const recoverable = txns.filter((t) => isRecoverable(trueCodeOf(t.raw))).length;
+
+    // Summed with the same `mulBps` the gate uses, so the denominator rounds identically to
+    // the numerator. Postgres bigint division truncates where `mulBps` rounds half away from
+    // zero, and a page whose total disagreed with the engine by a paise per row would be
+    // worse than a page with no total.
+    let grossAtRisk = ZERO;
+    let marginAtRisk = ZERO;
+    for (const t of txns) {
+      const amount = PaiseSchema.parse(t.amount_paise);
+      grossAtRisk = add(grossAtRisk, amount);
+      marginAtRisk = add(marginAtRisk, mulBps(amount, bps(t.margin_bps)));
+    }
 
     const outcomes = await db()
       .selectFrom('outcome')
@@ -178,6 +214,9 @@ export async function loadArms(seed: number): Promise<readonly ArmRow[]> {
       label: ARM_LABELS[batch.arm] ?? batch.arm,
       recovered: recoveredTxns.size,
       recoverable,
+      transactions: txns.length,
+      grossAtRisk,
+      marginAtRisk,
       rateBps: recoverable === 0 ? 0 : Math.round((recoveredTxns.size / recoverable) * 10_000),
       valueRecovered: value,
       cost,
