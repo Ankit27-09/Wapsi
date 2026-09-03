@@ -528,7 +528,7 @@ export function planTxns(seed: number, count: number): {
   // The fix is to model the real pipeline rather than to widen a threshold until something
   // happened: an outage causes a burst of failures, and those failures ARE recovery cases.
   txns.push(
-    ...planOutageCases(seed, truth.outages, customers, {
+    ...planOutageCases(seed, count, truth.outages, customers, {
       rngStrings: deriveRng(seed, 'outage_strings'),
       rngAmounts: deriveRng(seed, 'outage_amounts'),
     }),
@@ -538,13 +538,20 @@ export function planTxns(seed: number, count: number): {
 }
 
 /**
- * How many recovery cases each material outage contributes.
+ * What share of the batch each material outage contributes, in basis points.
  *
- * Modest on purpose. The point is to make the detector's finding actionable on a measurable
- * slice of the book, not to make the headline depend on it — an outage cohort large enough
- * to move the total would be choosing the result rather than demonstrating the mechanism.
+ * PROPORTIONAL, AND IT WAS A FLAT 14 FIRST. That worked at the default 300 — 4.5% per
+ * episode, 9% for both, a measurable slice that could not move the headline. It broke
+ * everything smaller: `pnpm ablate --count 25` produced a 53-transaction batch of which 28
+ * were outage cases, so 53% of the population was one narrow cohort with a near-uniform
+ * cause mix, and the classifier arms tied at 31% because there was almost nothing left to
+ * classify. A flag that is supposed to make a run quicker silently changed what the run
+ * measured.
+ *
+ * 450 bps of `count` per episode reproduces 14 exactly at 300, so every published figure is
+ * unchanged, and scales down to 1 at 25 where that is the honest amount.
  */
-const CASES_PER_OUTAGE = 14;
+const OUTAGE_CASE_SHARE_BPS = 450;
 
 /**
  * The share of an outage's failures that carry its own cause.
@@ -574,10 +581,14 @@ const OUTAGE_BACKGROUND_CAUSES: readonly {
 
 function planOutageCases(
   seed: number,
+  count: number,
   outages: readonly Outage[],
   customers: readonly PlannedCustomer[],
   rngs: { readonly rngStrings: Rng; readonly rngAmounts: Rng },
 ): readonly PlannedTxn[] {
+  const perOutage = Math.round((count * OUTAGE_CASE_SHARE_BPS) / 10_000);
+  if (perOutage < 1) return [];
+
   const rng = deriveRng(seed, 'outage_cases');
   const out: PlannedTxn[] = [];
 
@@ -593,7 +604,7 @@ function planOutageCases(
 
     if (eligible.length === 0) continue;
 
-    for (let i = 0; i < CASES_PER_OUTAGE; i += 1) {
+    for (let i = 0; i < perOutage; i += 1) {
       const chosen = eligible[i % eligible.length];
       if (chosen === undefined) continue;
 

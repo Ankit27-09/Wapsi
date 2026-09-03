@@ -113,6 +113,8 @@ async function runClassifierArm(
   const policy = loadPolicy();
   const priors = loadPriorTable();
 
+  process.stdout.write(`  ${spec.label} — seeding ${env.count} transactions…\n`);
+
   // Checked before seeding, so a repeat run reports something actionable instead of a raw
   // duplicate-key error from Postgres. It cannot clean up after itself: `decision` and
   // `audit` are delete-protected by design, and a cascade from `batch` fires those same
@@ -152,6 +154,12 @@ async function runClassifierArm(
     classify: spec.classify,
   });
 
+  process.stdout.write(
+    `  ${spec.label} — ${run.transactions} transactions decided` +
+      (run.modelFailures > 0 ? `, ${run.modelFailures} model call(s) failed` : '') +
+      '\n',
+  );
+
   const metrics = await computeMetrics(db, {
     seed: env.seed,
     arm: 'rc',
@@ -162,7 +170,8 @@ async function runClassifierArm(
   return {
     label: spec.label,
     world: spec.world,
-    accuracy: spec.scorer === null ? null : await scoreClassifier(spec.scorer),
+    accuracy:
+      spec.scorer === null ? null : await scoreCorpusWithProgress(spec.label, spec.scorer),
     transactions: run.transactions,
     quarantined: run.quarantined,
     modelFailures: run.modelFailures,
@@ -173,6 +182,30 @@ async function runClassifierArm(
     net: metrics.net,
     modelCost: metrics.modelCosts,
   };
+}
+
+/**
+ * The corpus phase, narrated.
+ *
+ * 113 strings, serially, each with a retry ladder behind it. On a free-tier key that is
+ * minutes of work, and it used to print nothing — so the first person to run it reported a
+ * hang after eight minutes. They were right to: silence for that long IS a hang, as far as
+ * anyone watching can tell.
+ *
+ * Rewrites one line rather than printing 113, so the tables that follow are still readable.
+ * Every fifth item, so a slow provider still visibly moves.
+ */
+async function scoreCorpusWithProgress(
+  label: string,
+  scorer: Classifier,
+): Promise<AccuracyReport> {
+  const report = await scoreClassifier(scorer, (done, total) => {
+    if (done % 5 !== 0 && done !== total) return;
+    process.stdout.write(`\r  ${label} — scoring corpus ${done}/${total}…      `);
+  });
+
+  process.stdout.write('\n');
+  return report;
 }
 
 function table(headers: readonly string[], rows: readonly (readonly string[])[]): string {

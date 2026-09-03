@@ -73,8 +73,20 @@ export interface Prediction {
  * The corpus spans three difficulty tiers by construction, so a classifier cannot score
  * well by handling only the easy half. See `simulator/src/strings.ts` for why the tiers
  * exist and what each is meant to expose.
+ *
+ * SERIAL, AND IT REPORTS ITS PROGRESS. 113 strings against a model on a free tier, with a
+ * retry ladder behind each one, is minutes of work — and it used to print nothing at all,
+ * which made a slow phase indistinguishable from a hung one. It was reported as a hang, and
+ * fairly: eight minutes of silence is a hang as far as anyone watching is concerned.
+ *
+ * Serial rather than concurrent deliberately: the accuracy figure must not depend on how
+ * many requests happened to be in flight, and on a throttled key concurrency is what turns
+ * a slow run into a rate-limited one. `onProgress` is how it stops being silent instead.
  */
-export async function scoreClassifier(classifier: Classifier): Promise<AccuracyReport> {
+export async function scoreClassifier(
+  classifier: Classifier,
+  onProgress?: (done: number, total: number) => void,
+): Promise<AccuracyReport> {
   const corpus = allLabelledStrings();
 
   const byDifficulty: Record<Difficulty, { correct: number; total: number }> = {
@@ -102,6 +114,7 @@ export async function scoreClassifier(classifier: Classifier): Promise<AccuracyR
 
     latencies.push(result.latencyMs);
     totalCostPaise += result.costPaise;
+    onProgress?.(latencies.length, corpus.length);
 
     const tier = byDifficulty[item.difficulty];
     tier.total += 1;

@@ -198,7 +198,23 @@ async function attemptPost(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
+  /*
+   * THE TIMER COVERS THE BODY TOO, and it did not before.
+   *
+   * `clearTimeout` used to sit in a `finally` attached to the fetch alone, so the abort
+   * signal was disarmed the moment response HEADERS arrived. If the body then stalled —
+   * which a throttling proxy or a half-open connection does routinely — `response.text()`
+   * waited forever with nothing to interrupt it. No timeout, no retry, no error, no output:
+   * a batch that had made zero recorded calls and looked identical to a hang, because it
+   * was one.
+   *
+   * Found by running `pnpm ablate` and watching it sit for eight minutes with `abl-llm`
+   * created and `llm_call` empty. The retry ladder should have given up inside four
+   * minutes, so the fact that nothing had been recorded located the stall past the point
+   * the timer was being cleared.
+   */
   let response: Response;
+  let text: string;
   try {
     response = await fetch(url, {
       method: 'POST',
@@ -206,6 +222,9 @@ async function attemptPost(
       body: JSON.stringify(body),
       signal: controller.signal,
     });
+    // Inside the same try, so an abort during the read is caught and reported as a network
+    // failure that the retry ladder can act on.
+    text = await response.text();
   } catch (cause) {
     const aborted = cause instanceof Error && cause.name === 'AbortError';
     throw new ProviderError({
@@ -221,8 +240,6 @@ async function attemptPost(
   } finally {
     clearTimeout(timer);
   }
-
-  const text = await response.text();
 
   if (!response.ok) {
     throw new ProviderError({
