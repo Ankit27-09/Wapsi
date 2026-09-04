@@ -1,8 +1,12 @@
 > **SUPERSEDED.** This was written before degradation detection existed, so it describes a
 > three-step loop (diagnose → price → decide) where the system now has six, and it does not
-> mention the detector, the ablation's rupee result, the injection measurement or the
-> Hinglish audio. Kept for the build record. The current five-minute script lives outside
-> the repository.
+> mention the detector, the ablation's rupee result, the injection measurement, the Hinglish
+> audio or the email dispatch. Several of its figures are also stale.
+>
+> **What was actually recorded is the six-minute video:**
+> https://www.youtube.com/watch?v=NAHctlLx_F4
+>
+> This file is kept only for the build record.
 
 # 5-minute demo script
 

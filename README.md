@@ -4,11 +4,16 @@
 
 Razorpay AI Buildathon 2026 · Track 03 — AI Revenue Recovery
 
-> **▶ Demo video:** _add link before submitting_
->
-> | | | | |
-> |---|---|---|---|
-> | **₹3,03,561.74** net recovered | **61.4%** of the achievable ceiling | **0 of 296** attempts destroyed value | **280** tests |
+<a href="https://www.youtube.com/watch?v=NAHctlLx_F4">
+  <img src="docs/demo-thumbnail.png" alt="Watch the six-minute demo — Wapsi, Razorpay AI Buildathon 2026 Track 03" width="100%">
+</a>
+
+**▶ [Watch the six-minute demo](https://www.youtube.com/watch?v=NAHctlLx_F4)** — every number
+in it is read live from Postgres on screen, including a mid-demo switch to a different seed.
+
+| | | | |
+|---|---|---|---|
+| **₹3,03,561.74** net recovered | **61.4%** of the achievable ceiling | **0 of 296** attempts destroyed value | **280** tests |
 
 One decision engine across five kinds of revenue at risk — failed payments, failed
 subscription cycles, lapsed mandates, abandoned checkouts and overdue B2B invoices. It decides
@@ -321,6 +326,10 @@ and confirming each one fails:
 > forbidden import in the file**, because a pnpm workspace import resolves through a
 > `node_modules` symlink the config had excluded from the graph. A boundary rule nobody has
 > tried to break is not a boundary. ([entry 20](FAILURES.md))
+
+This is the claim most worth disbelieving, so it is **broken on camera** in the
+[demo video](https://www.youtube.com/watch?v=NAHctlLx_F4): a forbidden import is added to
+`packages/policy/src/ev.ts`, the build fails in three seconds, and the line is deleted again.
 
 ### What the guardrails cost, in rupees
 
