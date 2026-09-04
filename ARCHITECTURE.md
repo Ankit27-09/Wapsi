@@ -700,7 +700,7 @@ client can never decide anything.
 ## 12. Where the AI is, and is not
 
 ```mermaid
-flowchart LR
+flowchart TD
     subgraph ai["MODEL — three jobs, all bounded"]
         C["<b>classify</b><br/>messy gateway text →<br/>one of 18 reason codes"]
         P["<b>propose</b><br/>audit trail →<br/>two tunable numbers"]

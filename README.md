@@ -229,18 +229,62 @@ because it disabled the check that catches the other eight.
 
 ## 5 · Architecture
 
-```
-revenue at risk → classify → POLICY ENGINE → EV GATE → BOUNDS → worker → audit
-                     │            │                                        │
-                   (LLM)    (deterministic)                        (append-only)
-                     │
-              low confidence → quarantine → cluster → propose taxonomy entry → human
+**Where the AI is, and where it is not.** The model has three jobs and none of them can move
+money:
+
+```mermaid
+flowchart TD
+    subgraph ai["MODEL — three jobs, all bounded"]
+        C["<b>classify</b><br/>messy gateway text →<br/>one of 18 reason codes"]
+        P["<b>propose</b><br/>audit trail →<br/>two tunable numbers"]
+        V["<b>speak</b><br/>a registered script →<br/>audio, nothing composed"]
+    end
+
+    subgraph stat["STATISTICS — no model at all"]
+        D["<b>detect</b><br/>rolling windows · Wilson bound<br/>contemporaneous peer baselines"]
+    end
+
+    subgraph det["DETERMINISTIC — everything that moves money"]
+        G["expected-value gate"]
+        B["bounds"]
+        S["schedules"]
+        I["idempotency"]
+        A["audit"]
+    end
+
+    C -->|"a reason code,<br/>and nothing else"| det
+    P -->|"a proposal a human<br/>must approve"| det
+    D -->|"a bound, with the counts<br/>it was computed from"| det
+    det -->|"an approved template id"| V
+    det --> MONEY["money moves"]
+
+    style ai fill:#1e1b4b,stroke:#818cf8,color:#e0e7ff
+    style stat fill:#164e63,stroke:#67e8f9,color:#cffafe
+    style det fill:#064e3b,stroke:#34d399,color:#d1fae5
+    style MONEY fill:#0c4a6e,stroke:#22d3ee,color:#e0f2fe
 ```
 
 **The hard line.** The LLM classifies noisy gateway strings, clusters unknown ones, fills
 variables inside DLT-registered message templates, and proposes policy diffs for human
 approval. Deterministic code makes every retry decision, every timing calculation, every bound
 check and every rupee of arithmetic. **Non-deterministic systems do not move money.**
+
+Read the arrows: everything the model produces is a **value**, not an action. `classify`
+returns a reason code that can only *index into* the policy — it selects a schedule row, it
+cannot become one. `propose` returns two numbers a human must approve. `speak` is the only
+thing downstream of the deterministic core, and it receives an already-approved template id
+rather than choosing what to say. Degradation detection sits outside the model entirely: it is
+rolling windows and a Wilson lower bound, because "this cohort is failing" is a statistical
+claim and a language model is the wrong instrument for it.
+
+The pipeline through that core, end to end:
+
+```
+revenue at risk → classify → POLICY ENGINE → EV GATE → BOUNDS → worker → audit
+                                                                            │
+                                                                     (append-only)
+     low confidence → quarantine → cluster → propose taxonomy entry → human
+```
 
 **→ [`ARCHITECTURE.md`](ARCHITECTURE.md) — fifteen diagrams across thirteen sections.** The
 agent loop, the package graph and the wall through it, the full refusal decision tree, one
