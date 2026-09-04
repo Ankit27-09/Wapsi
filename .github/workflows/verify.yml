@@ -1,0 +1,94 @@
+# Typecheck, lint, the dependency-cruiser boundary rules, and all 280 tests.
+#
+# WHY POSTGRES RUNS HERE. Twenty-one of the tests talk to a real database, and they are the
+# ones worth running most: the append-only triggers and `FOR UPDATE SKIP LOCKED` are exactly
+# what a mocked database would let pass. Without a service container they skip cleanly and the
+# badge would cover 259 of 280 tests while looking identical — which is the kind of quiet gap
+# this project exists to argue against.
+#
+# NO SECRETS ARE NEEDED. Every third-party path is a dry run without a key: the LLM ablation
+# arms are skipped rather than estimated, `pnpm razorpay` and `pnpm voice` print the request
+# they would send, and email refuses to resolve a recipient. So a fork's pull request runs the
+# full suite with no configuration.
+
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        # Pinned to the same image as docker-compose.yml, because "works in CI" and "works on
+        # a laptop" should not be able to diverge on a patch release.
+        image: postgres:16.6-alpine
+        env:
+          POSTGRES_USER: rc
+          POSTGRES_PASSWORD: rc_local_only
+          POSTGRES_DB: recovery_controller
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U rc -d recovery_controller"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      # Matches the port mapping above and the default in .env.example, so nothing has to be
+      # configured twice.
+      DATABASE_URL: postgres://rc:rc_local_only@localhost:5433/recovery_controller
+      REDIS_URL: redis://localhost:6380
+      EVAL_SEED: '42'
+      NODE_ENV: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      # Before the tests, not as part of them: a test that migrates is a test that passes on an
+      # empty database for the wrong reason.
+      - name: Apply migrations
+        run: pnpm db:migrate
+
+      - name: Verify — typecheck, lint, boundaries, tests
+        run: pnpm verify
+
+      # The boundary rules are the load-bearing claim in this repository, so they are asserted
+      # a second time in isolation. If the wall ever stops being enforced, this line is the one
+      # that says so rather than a passing suite that quietly skipped it.
+      - name: Re-assert the Chinese wall in isolation
+        run: pnpm lint:boundaries
+
+      - name: Upload the test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-json
+          path: artifacts/tests.json
+          if-no-files-found: warn

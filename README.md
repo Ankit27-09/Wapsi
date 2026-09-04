@@ -4,6 +4,10 @@
 
 Razorpay AI Buildathon 2026 · Track 03 — AI Revenue Recovery
 
+[![verify](https://github.com/Ankit27-09/Razorpay-buildathon-track03/actions/workflows/verify.yml/badge.svg)](https://github.com/Ankit27-09/Razorpay-buildathon-track03/actions/workflows/verify.yml)
+[![licence: MIT](https://img.shields.io/badge/licence-MIT-0891b2.svg)](LICENSE)
+[![Node 22+](https://img.shields.io/badge/node-22%2B-0891b2.svg)](package.json)
+
 <a href="https://www.youtube.com/watch?v=NAHctlLx_F4">
   <img src="docs/demo-thumbnail.png" alt="Watch the six-minute demo — Wapsi, Razorpay AI Buildathon 2026 Track 03" width="100%">
 </a>

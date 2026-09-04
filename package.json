@@ -2,6 +2,12 @@
   "name": "wapsi",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ankit27-09/Razorpay-buildathon-track03.git"
+  },
+  "homepage": "https://github.com/Ankit27-09/Razorpay-buildathon-track03#readme",
   "type": "module",
   "description": "Expected-value gated payment recovery with a bounded, self-improving policy",
   "engines": {
