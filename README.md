@@ -238,6 +238,16 @@ because it disabled the check that catches the other eight.
 
 ## 5 · Architecture
 
+Eight tiers. The two worth reading first are **4**, where degradation detection sits outside
+the model entirely, and **8**, which is the other side of the Chinese wall.
+
+<a href="docs/architecture.png">
+  <img src="docs/architecture.png" alt="Wapsi system architecture — console, agent loop, model, statistics, policy and safety, external integrations, persistence, and the measurement half behind the Chinese wall" width="100%">
+</a>
+
+<sub>Click to open full size. Every node name, bound and identifier in it is taken from the
+source — the nineteen refusal reasons are listed by their real names, not summarised.</sub>
+
 **Where the AI is, and where it is not.** The model has three jobs and none of them can move
 money:
 
@@ -286,14 +296,10 @@ rather than choosing what to say. Degradation detection sits outside the model e
 rolling windows and a Wilson lower bound, because "this cohort is failing" is a statistical
 claim and a language model is the wrong instrument for it.
 
-The pipeline through that core, end to end:
-
-```
-revenue at risk → classify → POLICY ENGINE → EV GATE → BOUNDS → worker → audit
-                                                                            │
-                                                                     (append-only)
-     low confidence → quarantine → cluster → propose taxonomy entry → human
-```
+One path the diagram above does not show, because it leaves the money path entirely: a
+classification below the confidence floor becomes `unknown`, which permits no action at all —
+`low confidence → quarantine → cluster → propose a taxonomy entry → human`. On the current
+run that is 111 of 310 transactions, and it is the largest remaining loss in the system.
 
 **→ [`ARCHITECTURE.md`](ARCHITECTURE.md) — fifteen diagrams across thirteen sections.** The
 agent loop, the package graph and the wall through it, the full refusal decision tree, one

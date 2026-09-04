@@ -3,14 +3,16 @@
 **Wapsi** (वापसी · *the return*) — expected-value gated revenue recovery.
 Razorpay AI Buildathon 2026 · Track 03
 
-Every diagram below renders natively on GitHub. Every package name, table name, enum value and
-edge is taken from the code, not drawn from memory — the dependency graph in §2 is the output
-of `pnpm lint:boundaries`, which is the same check that fails the build.
+The system overview below is an exported diagram; every one of the fifteen after it is mermaid
+that renders natively on GitHub. Every package name, table name, enum value and edge is taken
+from the code, not drawn from memory — the dependency graph in §2 is the output of
+`pnpm lint:boundaries`, which is the same check that fails the build.
 
 ---
 
 ## Contents
 
+0. [The whole system, on one page](#0-the-whole-system-on-one-page) — eight tiers, every bound named
 1. [The agent loop](#1-the-agent-loop) — detect, determine, execute, and the exit
 2. [Package graph](#2-package-graph) — the real module dependencies, and the wall through them
 3. [The Chinese wall](#3-the-chinese-wall) — why the numbers carry information
@@ -24,6 +26,26 @@ of `pnpm lint:boundaries`, which is the same check that fails the build.
 11. [Runtime topology](#11-runtime-topology) — what processes exist and what they touch
 12. [Where the AI is, and is not](#12-where-the-ai-is-and-is-not)
 13. [Trust boundaries](#13-trust-boundaries)
+
+---
+
+## 0. The whole system, on one page
+
+Eight tiers. Read **4** and **8** first: tier 4 is where degradation detection sits, *outside*
+the model, because "this cohort is failing" is a statistical claim and a language model is the
+wrong instrument for it. Tier 8 is the other side of the Chinese wall — the half that holds the
+answers and that the policy engine cannot import.
+
+Two things this diagram says that most architecture diagrams of this shape do not. There is
+**no API tier**: the console's Server Components query Postgres directly, which removes a whole
+layer and the drift that comes with it. And the nineteen refusal reasons are listed by their
+real identifiers rather than summarised as a count, so every one of them can be grepped.
+
+<a href="docs/architecture.png">
+  <img src="docs/architecture.png" alt="Wapsi system architecture — eight tiers: console, the agent loop, the model's three bounded jobs, statistics, policy and safety, external integrations, persistence, and the measurement half behind the Chinese wall" width="100%">
+</a>
+
+<sub>Click to open at full resolution. The sections below take each tier apart.</sub>
 
 ---
 
