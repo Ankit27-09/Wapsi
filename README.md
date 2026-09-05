@@ -24,6 +24,28 @@ subscription cycles, lapsed mandates, abandoned checkouts and overdue B2B invoic
 what to try, when, and on which rail or channel. Most of the time it decides **not to act at
 all**, and it can prove in rupees why that was right.
 
+> [!NOTE]
+> **Key references and operational guardrails**
+>
+> - **Statutory grounding & citations:** RBI's e-mandate framework (24-hour pre-debit notice,
+>   `DPSS.CO.PD.No.447/02.14.003/2019-20`), TRAI TCCCPR 2018 (three-layer DLT registration and
+>   the NCPR/DND register), RBI's August 2022 recovery-agent calling window, ISO 8583 field 39,
+>   and Wilson (1927) for the detector's small-sample bound — each mapped to the exact rule it
+>   enforces in **[`RESEARCH.md`](RESEARCH.md)**.
+> - **What is *not* sourced, said first rather than found later:** all **39 probability priors
+>   are marked `ASSUMED`** — none carries a citation. Assumed rows automatically take a **±60%**
+>   perturbation band against ±40% for a cited one, so every headline figure here is already
+>   reported under the harsher of the two treatments.
+> - **Empirical results:** six arms over one identical seeded population, a 500-world
+>   sensitivity sweep, three hostile worlds and the classifier ablation priced in rupees —
+>   [§3 Results](#3--results) and [§7 Evaluation](#7--evaluation). Every number is regenerated
+>   by `pnpm demo`; none is typed into this page.
+> - **Sandbox quota preservation:** diagnosis, pricing and policy gating run on every batch,
+>   but live external side-effects — Razorpay Payment Links, Sarvam voice synthesis, email
+>   dispatch — are **dry runs by default** and fire only on demand from the console. A clone
+>   with no keys still runs the entire pipeline and prints the exact request each integration
+>   would have sent.
+
 ---
 
 ## Contents
