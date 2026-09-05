@@ -819,8 +819,13 @@ Stated here rather than discovered in review.
 
 - **Outcomes come from a simulator, not a live gateway.** The sweep quantifies how much that
   matters; it does not remove it.
-- **Priors are drawn from public sources** and, where none exists, marked `ASSUMED` and given
-  the widest perturbation band. They are not fitted to any specific issuer.
+- **Every one of the 39 probability priors is currently marked `ASSUMED`** — not one carries a
+  citation, and the schema forces each to say so rather than omit its provenance. Assumed rows
+  automatically get the wider ±60% perturbation band against ±40% for a cited one, so the
+  headline result is already reported under the harsher treatment. The *rules* are a different
+  matter and are sourced: RBI's e-mandate framework, TRAI's TCCCPR, ISO 8583, and the rest are
+  set out in **[`RESEARCH.md`](RESEARCH.md)**, which also states plainly what is not sourced and
+  what would settle it.
 - **The hostile-world comparison is not like-for-like on population.** All three worlds net more
   than the shipped one while recovering fewer transactions, because perturbing those assumptions
   changes which transactions are recoverable at all. The `Fired` column is the load-bearing
@@ -860,5 +865,6 @@ this repository can be public.
 
 ---
 
-<sub>Build history: [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) ·
+<sub>Sources and regulatory grounding: [`RESEARCH.md`](RESEARCH.md) ·
+Build history: [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) ·
 Diagrams: [`ARCHITECTURE.md`](ARCHITECTURE.md) · What broke: [`FAILURES.md`](FAILURES.md)</sub>
